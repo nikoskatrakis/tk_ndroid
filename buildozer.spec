@@ -6,7 +6,7 @@ package.domain = com.timekeeper
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 
-version = 0.00001
+version = 0.00002
 
 requirements = python3,kivy,android
 
@@ -15,7 +15,7 @@ fullscreen = 0
 
 android.accept_sdk_license = True
 
-android.permissions = RECORD_AUDIO, INTERNET, WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE
+android.permissions = RECORD_AUDIO, INTERNET, WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE, WAKE_LOCK, FOREGROUND_SERVICE
 android.api = 34
 android.minapi = 21
 android.ndk = 28c
