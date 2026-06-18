@@ -14,16 +14,14 @@ orientation = portrait
 fullscreen = 0
 
 android.permissions = RECORD_AUDIO, INTERNET, WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE
-android.api = 33
+android.api = 34
 android.minapi = 21
 android.ndk = 25b
-android.sdk = 33
+android.sdk = 34
 android.arch = arm64-v8a
+android.build_tools_version = 34.0.0
 
 android.gradle_dependencies = androidx.core:core:1.10.0
-
-# FileProvider for CSV sharing
-android.add_src = src/
 
 [buildozer]
 log_level = 2
