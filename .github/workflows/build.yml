@@ -27,6 +27,8 @@ jobs:
             build-essential libltdl-dev \
             python3-pip autoconf libtool \
             pkg-config zlib1g-dev
+          sudo update-alternatives --set java /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+          java -version
 
       - name: Install buildozer and dependencies
         run: |
