@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00006"
+APP_VERSION        = "v0.00007"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -325,11 +325,16 @@ class TimerEngine:
 
     def sync(self):
         """Call on app resume — refreshes UI from wall-clock state."""
-        self._on_tick(self.elapsed, self._total_secs, self.state)
-        # Always reschedule if running — Kivy Clock stops firing during pause
-        # even though the event object still exists, so the not-None check is wrong.
-        if self.state == TimerState.RUNNING:
-            self._schedule()  # _schedule() cancels the old event before creating a new one
+        e = self.elapsed
+        self._on_tick(e, self._total_secs, self.state)
+        if self.state in (TimerState.RUNNING, TimerState.BREAK):
+            if e >= self._total_secs:
+                # Timer expired while backgrounded — trigger completion now
+                self._complete()
+            else:
+                # Always reschedule — Kivy Clock stops firing during pause
+                # even though the event object still exists
+                self._schedule()
 
     def state_dict(self):
         """Serialise state for the background service."""
@@ -664,7 +669,7 @@ class ArcTimer(Widget):
 
         mins = self.total // 60
         state_map = {
-            "idle":    "",
+            "idle":    f"{mins} min",
             "running": f"{mins} min",
             "paused":  "PAUSED",
             "break":   f"{mins} min break",
@@ -787,7 +792,7 @@ class MainScreen(Screen):
                                  color=C_TEXT)
         self._start_btn.bind(on_release=lambda *a: self._app.on_start_pause())
         self._stop_btn = Button(text="■  Stop", font_size=dp(18),
-                                background_normal="", background_color=C_BTN,
+                                background_normal="", background_color=C_RED,
                                 color=C_TEXT)
         self._stop_btn.bind(on_release=lambda *a: self._app.on_stop())
         btn_row.add_widget(self._start_btn)
@@ -1299,12 +1304,36 @@ class TimekeeperApp(App):
             return
         try:
             from jnius import autoclass
-            RingtoneManager = autoclass('android.media.RingtoneManager')
-            PythonActivity  = autoclass('org.kivy.android.PythonActivity')
-            context  = PythonActivity.mActivity
-            uri      = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            PythonActivity      = autoclass('org.kivy.android.PythonActivity')
+            RingtoneManager     = autoclass('android.media.RingtoneManager')
+            NotificationManager = autoclass('android.app.NotificationManager')
+            NotificationChannel = autoclass('android.app.NotificationChannel')
+            Notification        = autoclass('android.app.Notification')
+            Builder             = autoclass('android.app.Notification$Builder')
+
+            context = PythonActivity.mActivity
+
+            # ── Notification (plays sound even on lock screen) ──
+            nm = context.getSystemService(context.NOTIFICATION_SERVICE)
+            ch = NotificationChannel(
+                "tk_alert", "Timekeeper Alert", NotificationManager.IMPORTANCE_HIGH
+            )
+            ch.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC)
+            nm.createNotificationChannel(ch)
+            b = Builder(context, "tk_alert")
+            b.setSmallIcon(context.getApplicationInfo().icon)
+            b.setContentTitle("Timekeeper")
+            b.setContentText("Timer complete — well done!")
+            b.setAutoCancel(True)
+            nm.notify(3, b.build())
+
+            # ── Also play alarm ringtone directly (more dramatic than notification beep) ──
+            uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            if uri is None:
+                uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
             ringtone = RingtoneManager.getRingtone(context, uri)
-            ringtone.play()
+            if ringtone:
+                ringtone.play()
         except Exception as e:
             print(f"[Alert] sound error: {e}")
 
@@ -1364,6 +1393,9 @@ class TimekeeperApp(App):
         e    = elapsed if elapsed is not None else eng.elapsed
         t    = total   if total   is not None else eng._total_secs
         s    = state   if state   is not None else eng.state
+        # When idle, show task duration so arc displays "25 min" ready for next interval
+        if s == TimerState.IDLE:
+            t = int(self.storage.get_setting("task_mins", DEFAULT_TASK_MINS)) * 60
         name = self._current_task["name"] if self._current_task else ""
         done = self.storage.today_interval_count()
         goal = int(self.storage.get_setting("daily_goal", DEFAULT_DAILY_GOAL))
