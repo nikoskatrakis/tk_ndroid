@@ -1,5 +1,5 @@
 """
-Timekeeper for Android
+Timekeeper for Android  v0.00003
 A free, open-source, ad-free time tracking app.
 """
 
@@ -8,7 +8,9 @@ kivy.require("2.3.0")
 
 import os
 import csv
+import json
 import sqlite3
+import threading
 from datetime import datetime, date
 
 from kivy.app import App
@@ -29,14 +31,14 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00002"
+APP_VERSION        = "v0.00004"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
 DEFAULT_DAILY_GOAL = 10
 MANUAL_TASK_ID     = 999
 COMMENT_MAX_CHARS  = 1000
-MIN_RECORD_SECS    = 10   # ignore entries shorter than 10 seconds
+MIN_RECORD_SECS    = 10
 
 if platform == "android":
     from android.storage import app_storage_path  # type: ignore
@@ -45,7 +47,8 @@ else:
     DATA_DIR = os.path.join(os.path.expanduser("~"), "Documents", "tk_ndroid")
 
 os.makedirs(DATA_DIR, exist_ok=True)
-DB_PATH = os.path.join(DATA_DIR, "timekeeper.db")
+DB_PATH         = os.path.join(DATA_DIR, "timekeeper.db")
+TIMER_STATE_PATH = os.path.join(DATA_DIR, "timer_state.json")
 
 # ─── Colours ──────────────────────────────────────────────────────────────────
 
@@ -97,9 +100,9 @@ class Storage:
                 );
             """)
             defaults = {
-                "task_mins":   str(DEFAULT_TASK_MINS),
-                "break_mins":  str(DEFAULT_BREAK_MINS),
-                "daily_goal":  str(DEFAULT_DAILY_GOAL),
+                "task_mins":  str(DEFAULT_TASK_MINS),
+                "break_mins": str(DEFAULT_BREAK_MINS),
+                "daily_goal": str(DEFAULT_DAILY_GOAL),
             }
             for k, v in defaults.items():
                 conn.execute(
@@ -148,8 +151,7 @@ class Storage:
                  start.strftime("%Y-%m-%d"),
                  start.strftime("%H:%M:%S"),
                  end.strftime("%H:%M:%S"),
-                 duration_secs, interval_num,
-                 comment[:COMMENT_MAX_CHARS])
+                 duration_secs, interval_num, comment[:COMMENT_MAX_CHARS])
             )
 
     def get_entries(self, limit=200):
@@ -255,8 +257,8 @@ class TimerState:
 class TimerEngine:
     """
     Wall-clock based timer engine.
-    Uses datetime.now() as the source of truth for elapsed time,
-    so the timer is accurate even when the app is backgrounded.
+    Elapsed time is always computed from datetime.now(), so it is accurate
+    even after the app is backgrounded and resumed.
     """
 
     def __init__(self, storage, on_tick, on_complete):
@@ -265,21 +267,21 @@ class TimerEngine:
         self._on_complete  = on_complete
         self.state         = TimerState.IDLE
         self._total_secs   = 0
-        self._accum_secs   = 0     # elapsed seconds before current run segment
-        self._run_start_dt = None  # wall-clock when current run segment began
-        self._start_dt     = None  # wall-clock when this interval began (for recording)
+        self._accum_secs   = 0     # elapsed before current run segment
+        self._run_start_dt = None  # when current run segment began
+        self._start_dt     = None  # when this whole interval began (for recording)
         self._task_id      = None
         self._task_name    = ""
         self._clock_ev     = None
 
-    # ── Public properties ──
+    # ── Properties ──
 
     @property
     def elapsed(self):
-        """Total elapsed seconds — computed from wall clock."""
         if self.state == TimerState.RUNNING and self._run_start_dt:
-            run_secs = int((datetime.now() - self._run_start_dt).total_seconds())
-            return self._accum_secs + run_secs
+            return self._accum_secs + int(
+                (datetime.now() - self._run_start_dt).total_seconds()
+            )
         return self._accum_secs
 
     @property
@@ -309,7 +311,6 @@ class TimerEngine:
 
     def pause(self):
         if self.state == TimerState.RUNNING:
-            # Freeze accumulated elapsed at current wall-clock value
             self._accum_secs   = self.elapsed
             self._run_start_dt = None
             self.state         = TimerState.PAUSED
@@ -323,8 +324,24 @@ class TimerEngine:
         self._reset()
 
     def sync(self):
-        """Call after app resumes from background to refresh the UI."""
+        """Call on app resume — refreshes UI from wall-clock state."""
         self._on_tick(self.elapsed, self._total_secs, self.state)
+        # Always reschedule if running — Kivy Clock stops firing during pause
+        # even though the event object still exists, so the not-None check is wrong.
+        if self.state == TimerState.RUNNING:
+            self._schedule()  # _schedule() cancels the old event before creating a new one
+
+    def state_dict(self):
+        """Serialise state for the background service."""
+        return {
+            "state":       self.state,
+            "task_id":     self._task_id,
+            "task_name":   self._task_name,
+            "total_secs":  self._total_secs,
+            "accum_secs":  self._accum_secs,
+            "run_start_dt": (self._run_start_dt.isoformat()
+                             if self._run_start_dt else None),
+        }
 
     # ── Internal ──
 
@@ -382,12 +399,12 @@ class TimerEngine:
         start_dt = self._start_dt or end_dt
         interval = self._storage.next_interval_num(self._task_id)
         self._storage.add_entry(
-            task_id      = self._task_id,
-            task_name    = self._task_name,
-            start        = start_dt,
-            end          = end_dt,
-            duration_secs= elapsed,
-            interval_num = interval,
+            task_id       = self._task_id,
+            task_name     = self._task_name,
+            start         = start_dt,
+            end           = end_dt,
+            duration_secs = elapsed,
+            interval_num  = interval,
         )
 
     def _reset(self):
@@ -400,94 +417,32 @@ class TimerEngine:
         self._on_tick(0, 0, self.state)
 
 
-# ─── Android Background Helpers ───────────────────────────────────────────────
+# ─── Android Service Manager ──────────────────────────────────────────────────
 
-class AndroidHelper:
-    """WakeLock + notification to keep timer alive in background."""
-
-    CHANNEL_ID = "timekeeper_timer"
+class ServiceManager:
+    """Starts and stops the background foreground service."""
 
     def __init__(self):
-        self._wake_lock = None
-        self._nm        = None
+        self._service = None
 
-    def setup(self):
+    def start(self):
         if platform != "android":
             return
         try:
-            from jnius import autoclass  # type: ignore
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            self._activity = PythonActivity.mActivity
-
-            # WakeLock
-            PowerManager = autoclass("android.os.PowerManager")
-            pm = self._activity.getSystemService(
-                self._activity.POWER_SERVICE
-            )
-            self._wake_lock = pm.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "Timekeeper:WakeLock"
-            )
-
-            # NotificationManager + channel
-            NotificationManager = autoclass("android.app.NotificationManager")
-            self._nm = self._activity.getSystemService(
-                self._activity.NOTIFICATION_SERVICE
-            )
-            NotificationChannel = autoclass("android.app.NotificationChannel")
-            channel = NotificationChannel(
-                self.CHANNEL_ID,
-                "Timekeeper Timer",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            self._nm.createNotificationChannel(channel)
+            from android import AndroidService  # type: ignore
+            self._service = AndroidService("Timekeeper Timer", "Timer running in background")
+            self._service.start("start")
         except Exception as e:
-            print(f"[Android] setup error: {e}")
+            print(f"[Service] start error: {e}")
 
-    def acquire(self):
-        if platform != "android" or not self._wake_lock:
+    def stop(self):
+        if platform != "android" or not self._service:
             return
         try:
-            if not self._wake_lock.isHeld():
-                self._wake_lock.acquire()
+            self._service.stop()
+            self._service = None
         except Exception as e:
-            print(f"[Android] wake lock acquire error: {e}")
-
-    def release(self):
-        if platform != "android" or not self._wake_lock:
-            return
-        try:
-            if self._wake_lock.isHeld():
-                self._wake_lock.release()
-        except Exception as e:
-            print(f"[Android] wake lock release error: {e}")
-
-    def show_notification(self, task_name, remaining_secs):
-        if platform != "android" or not self._nm:
-            return
-        try:
-            from jnius import autoclass  # type: ignore
-            Builder = autoclass("android.app.Notification$Builder")
-            builder = Builder(self._activity, self.CHANNEL_ID)
-            mins = remaining_secs // 60
-            secs = remaining_secs % 60
-            builder.setSmallIcon(
-                self._activity.getApplicationInfo().icon
-            )
-            builder.setContentTitle(f"Timekeeper — {task_name}")
-            builder.setContentText(f"{mins:02d}:{secs:02d} remaining")
-            builder.setOngoing(True)
-            self._nm.notify(1, builder.build())
-        except Exception as e:
-            print(f"[Android] notification error: {e}")
-
-    def cancel_notification(self):
-        if platform != "android" or not self._nm:
-            return
-        try:
-            self._nm.cancel(1)
-        except Exception as e:
-            print(f"[Android] cancel notification error: {e}")
+            print(f"[Service] stop error: {e}")
 
 
 # ─── Voice Handler ────────────────────────────────────────────────────────────
@@ -495,34 +450,60 @@ class AndroidHelper:
 class VoiceHandler:
     """
     Continuous Android SpeechRecognizer.
-    Restarts after each result or error so it listens indefinitely.
-    Commands: 'timekeeper start', 'timekeeper wait', 'timekeeper stop'.
+    Voice commands: 'Timekeeper Start', 'Timekeeper Wait', 'Timekeeper Stop'.
+    Must be initialised AFTER the Kivy app is fully built (call setup()).
     """
 
     def __init__(self, on_command):
         self._cb        = on_command
         self._active    = False
         self._listening = False
-        if platform == "android":
-            self._init_android()
+        self._recognizer = None
 
-    def _init_android(self):
+    def setup(self):
+        """Call this after App.build() — initialises SpeechRecognizer."""
+        if platform != "android":
+            return
         try:
-            # Request RECORD_AUDIO permission
-            from android.permissions import request_permissions, Permission  # type: ignore
-            request_permissions([Permission.RECORD_AUDIO])
-
-            from jnius import autoclass  # type: ignore
-            self._SR  = autoclass("android.speech.SpeechRecognizer")
-            self._RI  = autoclass("android.speech.RecognizerIntent")
-            ctx       = autoclass(
-                "org.kivy.android.PythonActivity"
-            ).mActivity
-            self._recognizer = self._SR.createSpeechRecognizer(ctx)
-            self._recognizer.setRecognitionListener(self._build_listener())
-            self._active = True
+            # Request permission
+            from android.permissions import (  # type: ignore
+                request_permissions, check_permission, Permission
+            )
+            if not check_permission(Permission.RECORD_AUDIO):
+                request_permissions(
+                    [Permission.RECORD_AUDIO],
+                    callback=self._on_permission_result
+                )
+            else:
+                self._init_recognizer()
         except Exception as e:
-            print(f"[Voice] init failed: {e}")
+            print(f"[Voice] setup error: {e}")
+
+    def _on_permission_result(self, permissions, grant_results):
+        if grant_results and all(grant_results):
+            self._init_recognizer()
+            Clock.schedule_once(lambda dt: self.start_listening(), 1)
+        else:
+            print("[Voice] RECORD_AUDIO permission denied")
+
+    def _init_recognizer(self):
+        try:
+            from jnius import autoclass  # type: ignore
+            SR  = autoclass("android.speech.SpeechRecognizer")
+            ctx = autoclass("org.kivy.android.PythonActivity").mActivity
+
+            if not SR.isRecognitionAvailable(ctx):
+                print("[Voice] Speech recognition not available on this device")
+                return
+
+            self._SR          = SR
+            self._RI          = autoclass("android.speech.RecognizerIntent")
+            self._recognizer  = SR.createSpeechRecognizer(ctx)
+            self._recognizer.setRecognitionListener(self._build_listener())
+            self._active      = True
+            print("[Voice] SpeechRecognizer initialised OK")
+        except Exception as e:
+            print(f"[Voice] init recognizer error: {e}")
 
     def _build_listener(self):
         from jnius import PythonJavaClass, java_method  # type: ignore
@@ -530,6 +511,7 @@ class VoiceHandler:
 
         class Listener(PythonJavaClass):
             __javainterfaces__ = ["android/speech/RecognitionListener"]
+            __javacontext__    = "app"
 
             @java_method("(Landroid/os/Bundle;)V")
             def onReadyForSpeech(self, params):
@@ -551,12 +533,15 @@ class VoiceHandler:
             def onEndOfSpeech(self):
                 pass
 
+            # onError(int error)
             @java_method("(I)V")
             def onError(self, error):
                 handler._listening = False
-                # Restart after short delay
-                Clock.schedule_once(lambda dt: handler.start_listening(), 1.5)
+                # error 7 = no match, error 6 = no speech — both normal, restart quickly
+                delay = 0.5 if error in (6, 7) else 2.0
+                Clock.schedule_once(lambda dt: handler.start_listening(), delay)
 
+            # onResults(Bundle results)
             @java_method("(Landroid/os/Bundle;)V")
             def onResults(self, results):
                 handler._listening = False
@@ -566,13 +551,14 @@ class VoiceHandler:
                         "android.speech.SpeechRecognizer"
                     ).RESULTS_RECOGNITION
                     matches = results.getStringArrayList(key)
-                    if matches:
+                    if matches and matches.size() > 0:
                         text = str(matches.get(0)).lower()
+                        print(f"[Voice] heard: {text}")
                         if "timekeeper start" in text:
                             Clock.schedule_once(
                                 lambda dt: handler._cb("start"), 0
                             )
-                        elif "timekeeper wait" in text:
+                        elif "timekeeper wait" in text or "timekeeper pause" in text:
                             Clock.schedule_once(
                                 lambda dt: handler._cb("wait"), 0
                             )
@@ -582,8 +568,8 @@ class VoiceHandler:
                             )
                 except Exception as e:
                     print(f"[Voice] onResults error: {e}")
-                # Restart listening
-                Clock.schedule_once(lambda dt: handler.start_listening(), 0.5)
+                # Always restart
+                Clock.schedule_once(lambda dt: handler.start_listening(), 0.3)
 
             @java_method("(Landroid/os/Bundle;)V")
             def onPartialResults(self, results):
@@ -596,7 +582,7 @@ class VoiceHandler:
         return Listener()
 
     def start_listening(self):
-        if not self._active or self._listening:
+        if not self._active or self._listening or not self._recognizer:
             return
         try:
             from jnius import autoclass  # type: ignore
@@ -606,16 +592,16 @@ class VoiceHandler:
                 self._RI.EXTRA_LANGUAGE_MODEL,
                 self._RI.LANGUAGE_MODEL_FREE_FORM
             )
-            intent.putExtra(self._RI.EXTRA_MAX_RESULTS, 1)
+            intent.putExtra(self._RI.EXTRA_MAX_RESULTS, 3)
             intent.putExtra(self._RI.EXTRA_PARTIAL_RESULTS, True)
             self._recognizer.startListening(intent)
             self._listening = True
         except Exception as e:
-            print(f"[Voice] startListening failed: {e}")
+            print(f"[Voice] startListening error: {e}")
             self._listening = False
 
     def stop_listening(self):
-        if not self._active:
+        if not self._active or not self._recognizer:
             return
         try:
             self._recognizer.stopListening()
@@ -674,8 +660,9 @@ class ArcTimer(Widget):
                       pos=(cx - tex.width / 2, cy - tex.height / 2),
                       size=tex.size)
 
-        state_map = {"idle": "", "running": "FOCUS",
-                     "paused": "PAUSED", "break": "BREAK"}
+        state_map = {
+            "idle": "", "running": "FOCUS", "paused": "PAUSED", "break": "BREAK"
+        }
         sub = state_map.get(self.state, "")
         if sub:
             slbl = CoreLabel(text=sub, font_size=dp(13))
@@ -684,7 +671,8 @@ class ArcTimer(Widget):
             with self.canvas:
                 Color(*C_SUBTEXT)
                 Rectangle(texture=stex,
-                          pos=(cx - stex.width / 2, cy - tex.height / 2 - dp(22)),
+                          pos=(cx - stex.width / 2,
+                               cy - tex.height / 2 - dp(22)),
                           size=stex.size)
 
 
@@ -760,6 +748,7 @@ class MainScreen(Screen):
         root.bind(pos=lambda w, v: setattr(self._bg, "pos", v),
                   size=lambda w, v: setattr(self._bg, "size", v))
 
+        # Top bar: menu | task name | version
         top = BoxLayout(size_hint=(1, None), height=dp(48), spacing=dp(8))
         menu_btn = Button(text="☰", size_hint=(None, 1), width=dp(48),
                           font_size=dp(22), background_normal="",
@@ -769,9 +758,13 @@ class MainScreen(Screen):
                                font_size=dp(17), bold=True,
                                color=C_TEXT, halign="center", valign="middle")
         self._task_lbl.bind(size=lambda l, v: setattr(l, "text_size", v))
+        ver_lbl = Label(text=APP_VERSION, font_size=dp(10), color=C_SUBTEXT,
+                        size_hint=(None, 1), width=dp(64),
+                        halign="right", valign="middle")
+        ver_lbl.bind(size=lambda l, v: setattr(l, "text_size", v))
         top.add_widget(menu_btn)
         top.add_widget(self._task_lbl)
-        top.add_widget(Widget(size_hint=(None, 1), width=dp(48)))
+        top.add_widget(ver_lbl)
         root.add_widget(top)
 
         self._arc = ArcTimer(size_hint=(1, 1))
@@ -831,15 +824,15 @@ class MenuScreen(Screen):
 
         root.add_widget(make_label("Menu", font_size=dp(22), color=C_TEXT))
         items = [
-            ("➕  New Task",        self._app.go_new_task),
-            ("✏️  Rename Task",      self._app.go_rename_task),
-            ("🔀  Switch Task",      self._app.go_switch_task),
-            ("📋  Edit Entries",     self._app.go_entries),
-            ("📤  Export CSV",       self._app.do_export_csv),
-            ("⚙️  Settings",         self._app.go_settings),
-            ("🎤  Voice Commands",   self._app.go_shortcuts),
-            ("ℹ️  About",            self._app.go_about),
-            ("← Back",              self._app.go_main),
+            ("➕  New Task",       self._app.go_new_task),
+            ("✏️  Rename Task",     self._app.go_rename_task),
+            ("🔀  Switch Task",     self._app.go_switch_task),
+            ("📋  Edit Entries",    self._app.go_entries),
+            ("📤  Export CSV",      self._app.do_export_csv),
+            ("⚙️  Settings",        self._app.go_settings),
+            ("🎤  Voice Commands",  self._app.go_shortcuts),
+            ("ℹ️  About",           self._app.go_about),
+            ("← Back",             self._app.go_main),
         ]
         for label, cb in items:
             root.add_widget(make_button(label, cb, height=dp(52)))
@@ -918,11 +911,11 @@ class EntryListScreen(Screen):
             secs = e["duration_secs"] % 60
             line = (f"{e['date']}  {e['start_time']}  "
                     f"{e['task_name']}  {mins}m{secs:02d}s")
-            row = BoxLayout(size_hint=(1, None), height=dp(52), spacing=dp(6))
-            lbl = Label(text=line, font_size=dp(12), color=C_TEXT,
-                        halign="left", valign="middle",
-                        size_hint=(1, 1), text_size=(None, None))
-            ec = dict(e)
+            row  = BoxLayout(size_hint=(1, None), height=dp(52), spacing=dp(6))
+            lbl  = Label(text=line, font_size=dp(12), color=C_TEXT,
+                         halign="left", valign="middle",
+                         size_hint=(1, 1), text_size=(None, None))
+            ec   = dict(e)
             edit_btn = Button(text="Edit", size_hint=(None, 1), width=dp(56),
                               font_size=dp(13), background_normal="",
                               background_color=C_BTN, color=C_TEXT)
@@ -981,7 +974,6 @@ class EditEntryScreen(Screen):
             row.add_widget(ti)
             root.add_widget(row)
 
-        # Comment field (multiline)
         root.add_widget(make_label("Comment", font_size=dp(13),
                                    color=C_SUBTEXT, halign="left"))
         comment_ti = TextInput(text=e.get("comment", ""), multiline=True,
@@ -1047,7 +1039,6 @@ class SettingsScreen(Screen):
 
         root.add_widget(make_label("Settings", font_size=dp(22), color=C_TEXT))
 
-        # Long break removed — only task duration, break duration, daily goal
         settings_def = [
             ("Task duration (mins)",   "task_mins",  str(DEFAULT_TASK_MINS)),
             ("Break duration (mins)",  "break_mins", str(DEFAULT_BREAK_MINS)),
@@ -1131,34 +1122,33 @@ class ShortcutsScreen(Screen):
 # ─── Main App ─────────────────────────────────────────────────────────────────
 
 class TimekeeperApp(App):
-    title = APP_NAME
+    title = f"{APP_NAME} {APP_VERSION}"
 
     def build(self):
         Window.clearcolor = C_BG
 
-        self.storage       = Storage(DB_PATH)
-        self._current_task = None
-        self._android      = AndroidHelper()
-        self._android.setup()
+        self.storage        = Storage(DB_PATH)
+        self._current_task  = None
+        self._svc_manager   = ServiceManager()
 
         self.engine = TimerEngine(
             self.storage,
-            on_tick     = self._on_tick,
-            on_complete = self._on_complete,
+            on_tick    = self._on_tick,
+            on_complete= self._on_complete,
         )
 
         self.voice = VoiceHandler(on_command=self._on_voice_command)
 
         self.sm = ScreenManager()
-        self._main_screen     = MainScreen(app=self)
-        self._menu_screen     = MenuScreen(app=self)
-        self._entries_screen  = EntryListScreen(app=self)
-        self._edit_screen     = EditEntryScreen(app=self)
-        self._settings_screen = SettingsScreen(app=self)
-        self._about_screen    = AboutScreen(app=self)
-        self._shortcuts_screen= ShortcutsScreen(app=self)
-        self._switch_screen   = TaskListScreen(app=self, mode="switch")
-        self._rename_screen   = TaskListScreen(app=self, mode="rename")
+        self._main_screen      = MainScreen(app=self)
+        self._menu_screen      = MenuScreen(app=self)
+        self._entries_screen   = EntryListScreen(app=self)
+        self._edit_screen      = EditEntryScreen(app=self)
+        self._settings_screen  = SettingsScreen(app=self)
+        self._about_screen     = AboutScreen(app=self)
+        self._shortcuts_screen = ShortcutsScreen(app=self)
+        self._switch_screen    = TaskListScreen(app=self, mode="switch")
+        self._rename_screen    = TaskListScreen(app=self, mode="rename")
 
         for s in [
             self._main_screen, self._menu_screen,
@@ -1169,9 +1159,9 @@ class TimekeeperApp(App):
         ]:
             self.sm.add_widget(s)
 
-        # Start voice listening
-        if platform == "android":
-            Clock.schedule_once(lambda dt: self.voice.start_listening(), 2)
+        # Initialise voice AFTER build (needs UI thread + activity ready)
+        Clock.schedule_once(lambda dt: self.voice.setup(), 1)
+        Clock.schedule_once(lambda dt: self.voice.start_listening(), 3)
 
         tasks = self.storage.get_tasks()
         if not tasks:
@@ -1183,33 +1173,41 @@ class TimekeeperApp(App):
     # ── Android lifecycle ──
 
     def on_pause(self):
-        """Allow app to pause (not stop). Timer keeps time via wall clock."""
-        if self.engine.state == TimerState.RUNNING:
-            self._android.acquire()
-            self._android.show_notification(
-                self._current_task["name"] if self._current_task else "Timer",
-                self.engine.remaining
-            )
+        """
+        Allow app to pause. The wall-clock engine keeps elapsed time accurate.
+        Write state to file so the background service can read it.
+        """
+        self._write_timer_state()
+        if self.engine.state in (TimerState.RUNNING, TimerState.BREAK):
+            self._svc_manager.start()
         return True
 
     def on_resume(self):
-        """Sync UI with wall-clock elapsed after returning from background."""
+        """Sync UI from wall clock after returning from background."""
         self.engine.sync()
         self._refresh_main()
-        if self.engine.state != TimerState.RUNNING:
-            self._android.release()
-            self._android.cancel_notification()
+        if self.engine.state == TimerState.IDLE:
+            self._svc_manager.stop()
+
+    # ── Timer state file ──
+
+    def _write_timer_state(self):
+        try:
+            with open(TIMER_STATE_PATH, "w") as f:
+                json.dump(self.engine.state_dict(), f)
+        except Exception as e:
+            print(f"[App] write state error: {e}")
 
     # ── Navigation ──
 
-    def go_main(self):      self.sm.current = "main"
-    def go_menu(self):      self.sm.current = "menu"
-    def go_entries(self):   self.sm.current = "entries"
-    def go_settings(self):  self.sm.current = "settings"
-    def go_about(self):     self.sm.current = "about"
-    def go_shortcuts(self): self.sm.current = "shortcuts"
-    def go_switch_task(self):  self.sm.current = "tasklist_switch"
-    def go_rename_task(self):  self.sm.current = "tasklist_rename"
+    def go_main(self):       self.sm.current = "main"
+    def go_menu(self):       self.sm.current = "menu"
+    def go_entries(self):    self.sm.current = "entries"
+    def go_settings(self):   self.sm.current = "settings"
+    def go_about(self):      self.sm.current = "about"
+    def go_shortcuts(self):  self.sm.current = "shortcuts"
+    def go_switch_task(self): self.sm.current = "tasklist_switch"
+    def go_rename_task(self): self.sm.current = "tasklist_rename"
 
     def go_new_task(self):
         show_input_popup("New Task", "Task name", self._create_task)
@@ -1263,16 +1261,16 @@ class TimekeeperApp(App):
             return
         if self.engine.state == TimerState.RUNNING:
             self.engine.pause()
-            self._android.release()
-            self._android.cancel_notification()
         else:
             if not self.engine.start():
                 self._prompt_first_task()
+            else:
+                self._write_timer_state()
 
     def on_stop(self):
         self.engine.stop()
-        self._android.release()
-        self._android.cancel_notification()
+        self._svc_manager.stop()
+        self._write_timer_state()
 
     # ── Timer callbacks ──
 
@@ -1280,12 +1278,12 @@ class TimekeeperApp(App):
         self._refresh_main(elapsed=elapsed, total=total, state=state)
 
     def _on_complete(self, state):
+        self._write_timer_state()
         if state == TimerState.RUNNING:
             show_popup("Interval complete!", "Starting break…")
         elif state == TimerState.BREAK:
             show_popup("Break over!", "Ready for next interval.")
-            self._android.release()
-            self._android.cancel_notification()
+            self._svc_manager.stop()
 
     # ── Voice ──
 
@@ -1327,7 +1325,7 @@ class TimekeeperApp(App):
         except Exception as e:
             show_popup("Export Error", str(e))
 
-    # ── Helpers ──
+    # ── UI refresh ──
 
     def _refresh_main(self, elapsed=None, total=None, state=None):
         eng  = self.engine
