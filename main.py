@@ -573,10 +573,7 @@ class VoiceHandler:
                             Clock.schedule_once(
                                 lambda dt: handler._cb("stop"), 0
                             )
-                        elif "timekeeper appear" in text:
-                            Clock.schedule_once(
-                                lambda dt: handler._cb("appear"), 0
-                            )
+
                 except Exception as e:
                     print(f"[Voice] onResults error: {e}")
                 # Always restart
@@ -1381,24 +1378,6 @@ class TimekeeperApp(App):
             self.engine.pause()
         elif cmd == "stop":
             self.on_stop()
-        elif cmd == "appear":
-            self._bring_to_foreground()
-
-    def _bring_to_foreground(self):
-        if platform != "android":
-            return
-        try:
-            from jnius import autoclass
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            Intent         = autoclass('android.content.Intent')
-            activity       = PythonActivity.mActivity
-            intent         = activity.getPackageManager().getLaunchIntentForPackage(
-                activity.getPackageName()
-            )
-            intent.addFlags(0x10000000)  # FLAG_ACTIVITY_REORDER_TO_FRONT
-            activity.startActivity(intent)
-        except Exception as e:
-            print(f"[Appear] error: {e}")
 
     # ── CSV Export ──
 
