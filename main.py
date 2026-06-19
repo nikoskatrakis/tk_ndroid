@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00007"
+APP_VERSION        = "v0.00008"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -357,6 +357,7 @@ class TimerEngine:
         self._run_start_dt = datetime.now()
         self._start_dt     = datetime.now()
         self.state         = TimerState.RUNNING
+        self._on_tick(0, self._total_secs, self.state)  # flip UI to task immediately
         self._schedule()
 
     def _begin_break(self):
@@ -366,6 +367,7 @@ class TimerEngine:
         self._run_start_dt = datetime.now()
         self._start_dt     = datetime.now()
         self.state         = TimerState.BREAK
+        self._on_tick(0, self._total_secs, self.state)  # flip UI to break immediately
         self._schedule()
 
     def _resume(self):
@@ -571,6 +573,10 @@ class VoiceHandler:
                             Clock.schedule_once(
                                 lambda dt: handler._cb("stop"), 0
                             )
+                        elif "timekeeper appear" in text:
+                            Clock.schedule_once(
+                                lambda dt: handler._cb("appear"), 0
+                            )
                 except Exception as e:
                     print(f"[Voice] onResults error: {e}")
                 # Always restart
@@ -669,8 +675,8 @@ class ArcTimer(Widget):
 
         mins = self.total // 60
         state_map = {
-            "idle":    f"{mins} min",
-            "running": f"{mins} min",
+            "idle":    f"{mins} min task",
+            "running": f"{mins} min task",
             "paused":  "PAUSED",
             "break":   f"{mins} min break",
         }
@@ -1186,7 +1192,12 @@ class TimekeeperApp(App):
         Clock.schedule_once(lambda dt: self.voice.start_listening(), 3)
 
         tasks = self.storage.get_tasks()
-        if not tasks:
+        if tasks:
+            last_id = self.storage.get_setting("last_task_id")
+            task = next((t for t in tasks if str(t["id"]) == str(last_id)), tasks[0])
+            self._current_task = task
+            self.engine.set_task(task["id"], task["name"])
+        else:
             Clock.schedule_once(lambda dt: self._prompt_first_task(), 0.5)
 
         self._refresh_main()
@@ -1251,12 +1262,14 @@ class TimekeeperApp(App):
         task_id = self.storage.add_task(name)
         self._current_task = {"id": task_id, "name": name}
         self.engine.set_task(task_id, name)
+        self.storage.set_setting("last_task_id", str(task_id))
         self._refresh_main()
         self.go_main()
 
     def select_task(self, task):
         self._current_task = task
         self.engine.set_task(task["id"], task["name"])
+        self.storage.set_setting("last_task_id", str(task["id"]))
         self._refresh_main()
         self.go_main()
 
@@ -1327,23 +1340,36 @@ class TimekeeperApp(App):
             b.setAutoCancel(True)
             nm.notify(3, b.build())
 
-            # ── Also play alarm ringtone directly (more dramatic than notification beep) ──
+            # ── Alarm ringtone (more dramatic; auto-stops after 5s or on popup dismiss) ──
             uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             if uri is None:
                 uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
             ringtone = RingtoneManager.getRingtone(context, uri)
             if ringtone:
                 ringtone.play()
+                self._alert_ringtone = ringtone
+                Clock.schedule_once(lambda dt: self._stop_alert(), 5)
         except Exception as e:
             print(f"[Alert] sound error: {e}")
+
+    def _stop_alert(self, *args):
+        r = getattr(self, '_alert_ringtone', None)
+        if r:
+            try:
+                r.stop()
+            except Exception:
+                pass
+            self._alert_ringtone = None
 
     def _on_complete(self, state):
         self._play_alert()
         self._write_timer_state()
         if state == TimerState.RUNNING:
-            show_popup("Interval complete!", "Starting break…")
+            show_popup("Interval complete!", "Starting break…",
+                       on_dismiss=self._stop_alert)
         elif state == TimerState.BREAK:
-            show_popup("Break over!", "Ready for next interval.")
+            show_popup("Break over!", "Ready for next interval.",
+                       on_dismiss=self._stop_alert)
             self._svc_manager.stop()
 
     # ── Voice ──
@@ -1355,6 +1381,24 @@ class TimekeeperApp(App):
             self.engine.pause()
         elif cmd == "stop":
             self.on_stop()
+        elif cmd == "appear":
+            self._bring_to_foreground()
+
+    def _bring_to_foreground(self):
+        if platform != "android":
+            return
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            Intent         = autoclass('android.content.Intent')
+            activity       = PythonActivity.mActivity
+            intent         = activity.getPackageManager().getLaunchIntentForPackage(
+                activity.getPackageName()
+            )
+            intent.addFlags(0x10000000)  # FLAG_ACTIVITY_REORDER_TO_FRONT
+            activity.startActivity(intent)
+        except Exception as e:
+            print(f"[Appear] error: {e}")
 
     # ── CSV Export ──
 
