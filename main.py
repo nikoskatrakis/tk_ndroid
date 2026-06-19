@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00004"
+APP_VERSION        = "v0.00006"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -615,12 +615,14 @@ class VoiceHandler:
 class ArcTimer(Widget):
     fraction  = NumericProperty(0.0)
     remaining = NumericProperty(0)
+    total     = NumericProperty(0)
     state     = StringProperty("idle")
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.bind(fraction=self._redraw, remaining=self._redraw,
-                  state=self._redraw, size=self._redraw, pos=self._redraw)
+                  total=self._redraw, state=self._redraw,
+                  size=self._redraw, pos=self._redraw)
 
     def _arc_colour(self):
         if self.state == "break":
@@ -660,8 +662,12 @@ class ArcTimer(Widget):
                       pos=(cx - tex.width / 2, cy - tex.height / 2),
                       size=tex.size)
 
+        mins = self.total // 60
         state_map = {
-            "idle": "", "running": "FOCUS", "paused": "PAUSED", "break": "BREAK"
+            "idle":    "",
+            "running": f"{mins} min",
+            "paused":  "PAUSED",
+            "break":   f"{mins} min break",
         }
         sub = state_map.get(self.state, "")
         if sub:
@@ -794,6 +800,7 @@ class MainScreen(Screen):
         fraction  = (elapsed / total) if total > 0 else 0.0
         self._arc.remaining = remaining
         self._arc.fraction  = fraction
+        self._arc.total     = total
         self._arc.state     = state
         self._task_lbl.text = task_name or "No task — open menu"
         self._goal_lbl.text = f"Today: {goal_done} / {goal_total} intervals"
@@ -1030,7 +1037,12 @@ class SettingsScreen(Screen):
 
     def on_pre_enter(self):
         self.clear_widgets()
-        root = BoxLayout(orientation="vertical", padding=dp(20), spacing=dp(14))
+
+        # Inner BoxLayout — height driven by content so ScrollView can scroll it
+        root = BoxLayout(orientation="vertical", padding=dp(20), spacing=dp(14),
+                         size_hint_y=None)
+        root.bind(minimum_height=root.setter("height"))
+
         with root.canvas.before:
             Color(*C_BG)
             rect = Rectangle(pos=root.pos, size=root.size)
@@ -1060,7 +1072,11 @@ class SettingsScreen(Screen):
 
         root.add_widget(make_button("Save Settings", self._save, bg=C_BTN_ACT))
         root.add_widget(make_button("← Back", self._app.go_menu))
-        self.add_widget(root)
+
+        # ScrollView so content stays reachable when keyboard appears (portrait + landscape)
+        sv = ScrollView(size_hint=(1, 1))
+        sv.add_widget(root)
+        self.add_widget(sv)
 
     def _save(self):
         for key, ti in self._inputs.items():
@@ -1126,6 +1142,7 @@ class TimekeeperApp(App):
 
     def build(self):
         Window.clearcolor = C_BG
+        Window.softinput_mode = "below_target"  # keep focused TextInput above keyboard
 
         self.storage        = Storage(DB_PATH)
         self._current_task  = None
@@ -1277,7 +1294,22 @@ class TimekeeperApp(App):
     def _on_tick(self, elapsed, total, state):
         self._refresh_main(elapsed=elapsed, total=total, state=state)
 
+    def _play_alert(self):
+        if platform != "android":
+            return
+        try:
+            from jnius import autoclass
+            RingtoneManager = autoclass('android.media.RingtoneManager')
+            PythonActivity  = autoclass('org.kivy.android.PythonActivity')
+            context  = PythonActivity.mActivity
+            uri      = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            ringtone = RingtoneManager.getRingtone(context, uri)
+            ringtone.play()
+        except Exception as e:
+            print(f"[Alert] sound error: {e}")
+
     def _on_complete(self, state):
+        self._play_alert()
         self._write_timer_state()
         if state == TimerState.RUNNING:
             show_popup("Interval complete!", "Starting break…")
