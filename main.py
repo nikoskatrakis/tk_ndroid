@@ -278,7 +278,7 @@ class TimerEngine:
 
     @property
     def elapsed(self):
-        if self.state == TimerState.RUNNING and self._run_start_dt:
+        if self.state in (TimerState.RUNNING, TimerState.BREAK) and self._run_start_dt:
             return self._accum_secs + int(
                 (datetime.now() - self._run_start_dt).total_seconds()
             )
@@ -321,7 +321,9 @@ class TimerEngine:
     def stop(self):
         if self.state in (TimerState.RUNNING, TimerState.PAUSED):
             self._record_entry()
-        self._reset()
+            self._begin_break()
+        elif self.state == TimerState.BREAK:
+            self._reset()
 
     def sync(self):
         """Call on app resume — refreshes UI from wall-clock state."""
@@ -742,8 +744,10 @@ def show_input_popup(title, hint, on_confirm, prefill=""):
     row.add_widget(make_button("Cancel", popup.dismiss))
     row.add_widget(make_button("OK", _confirm, bg=C_BTN_ACT))
     content.add_widget(row)
+    popup.bind(on_open=lambda *a: Clock.schedule_once(
+        lambda dt: setattr(ti, 'focus', True), 0.1
+    ))
     popup.open()
-    ti.focus = True
 
 
 # ─── Screens ──────────────────────────────────────────────────────────────────
@@ -805,7 +809,7 @@ class MainScreen(Screen):
 
     def update(self, elapsed, total, state, task_name="", goal_done=0, goal_total=10):
         remaining = max(0, total - elapsed)
-        fraction  = (elapsed / total) if total > 0 else 0.0
+        fraction  = min(1.0, (elapsed / total) if total > 0 else 0.0)
         self._arc.remaining = remaining
         self._arc.fraction  = fraction
         self._arc.total     = total
@@ -818,6 +822,9 @@ class MainScreen(Screen):
         elif state == TimerState.PAUSED:
             self._start_btn.text             = "▶  Resume"
             self._start_btn.background_color = C_BTN_ACT
+        elif state == TimerState.BREAK:
+            self._start_btn.text             = "⏭  Skip Break"
+            self._start_btn.background_color = C_BTN
         else:
             self._start_btn.text             = "▶  Start"
             self._start_btn.background_color = C_BTN_ACT
@@ -1301,7 +1308,8 @@ class TimekeeperApp(App):
 
     def on_stop(self):
         self.engine.stop()
-        self._svc_manager.stop()
+        if self.engine.state == TimerState.IDLE:
+            self._svc_manager.stop()
         self._write_timer_state()
 
     # ── Timer callbacks ──
