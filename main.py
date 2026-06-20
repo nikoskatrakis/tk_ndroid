@@ -321,9 +321,7 @@ class TimerEngine:
     def stop(self):
         if self.state in (TimerState.RUNNING, TimerState.PAUSED):
             self._record_entry()
-            self._begin_break()
-        elif self.state == TimerState.BREAK:
-            self._reset()
+        self._reset()
 
     def sync(self):
         """Call on app resume — refreshes UI from wall-clock state."""
@@ -402,7 +400,7 @@ class TimerEngine:
         if self._task_id is None:
             return
         elapsed = self.elapsed
-        if elapsed < MIN_RECORD_SECS:
+        if elapsed < 1:
             return
         end_dt   = datetime.now()
         start_dt = self._start_dt or end_dt
@@ -716,7 +714,7 @@ def show_popup(title, message, on_dismiss=None):
     content.add_widget(make_label(message, font_size=dp(14)))
     popup = Popup(title=title, content=content,
                   size_hint=(0.85, None), height=dp(200),
-                  background_color=C_SURFACE)
+                  background_color=C_SURFACE, auto_dismiss=False)
     content.add_widget(make_button("OK", popup.dismiss))
     if on_dismiss:
         popup.bind(on_dismiss=lambda *a: on_dismiss())
@@ -732,7 +730,7 @@ def show_input_popup(title, hint, on_confirm, prefill=""):
     content.add_widget(ti)
     popup = Popup(title=title, content=content,
                   size_hint=(0.88, None), height=dp(200),
-                  background_color=C_SURFACE)
+                  background_color=C_SURFACE, auto_dismiss=False)
 
     def _confirm():
         val = ti.text.strip()
@@ -1308,8 +1306,7 @@ class TimekeeperApp(App):
 
     def on_stop(self):
         self.engine.stop()
-        if self.engine.state == TimerState.IDLE:
-            self._svc_manager.stop()
+        self._svc_manager.stop()
         self._write_timer_state()
 
     # ── Timer callbacks ──
@@ -1401,19 +1398,16 @@ class TimekeeperApp(App):
     def _android_share(self, path):
         try:
             from jnius import autoclass  # type: ignore
-            File         = autoclass("java.io.File")
-            FileProvider = autoclass("androidx.core.content.FileProvider")
-            Intent       = autoclass("android.content.Intent")
-            Activity     = autoclass("org.kivy.android.PythonActivity")
-            ctx          = Activity.mActivity
-            uri          = FileProvider.getUriForFile(
-                ctx, ctx.getPackageName() + ".fileprovider", File(path)
-            )
+            Intent   = autoclass("android.content.Intent")
+            Activity = autoclass("org.kivy.android.PythonActivity")
+            ctx      = Activity.mActivity
+            with open(path, "r", encoding="utf-8") as f:
+                csv_text = f.read()
             intent = Intent(Intent.ACTION_SEND)
-            intent.setType("text/csv")
-            intent.putExtra(Intent.EXTRA_STREAM, uri)
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            ctx.startActivity(Intent.createChooser(intent, "Share CSV"))
+            intent.setType("text/plain")
+            intent.putExtra(Intent.EXTRA_SUBJECT, "Timekeeper CSV Export")
+            intent.putExtra(Intent.EXTRA_TEXT, csv_text)
+            ctx.startActivity(Intent.createChooser(intent, "Share Timekeeper Export"))
         except Exception as e:
             show_popup("Export Error", str(e))
 
