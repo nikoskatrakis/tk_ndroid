@@ -390,11 +390,11 @@ class TimerEngine:
         finished = self.state
         if finished == TimerState.RUNNING:
             self._record_entry()
+            self._begin_break()       # state = BREAK before popup opens
             self._on_complete(finished)
-            self._begin_break()
         elif finished == TimerState.BREAK:
+            self._reset()             # state = IDLE before popup opens
             self._on_complete(finished)
-            self._reset()
 
     def _record_entry(self):
         if self._task_id is None:
@@ -1378,7 +1378,9 @@ class TimekeeperApp(App):
 
     def _on_voice_command(self, cmd):
         if cmd == "start":
-            self.on_start_pause()
+            # Don't skip a break via voice — alarm sound can trigger false positives
+            if self.engine.state != TimerState.BREAK:
+                self.on_start_pause()
         elif cmd == "wait":
             self.engine.pause()
         elif cmd == "stop":
@@ -1405,11 +1407,13 @@ class TimekeeperApp(App):
                 csv_text = f.read()
             intent = Intent(Intent.ACTION_SEND)
             intent.setType("text/plain")
-            intent.putExtra(Intent.EXTRA_SUBJECT, "Timekeeper CSV Export")
-            intent.putExtra(Intent.EXTRA_TEXT, csv_text)
+            # Use literal key strings — avoids jnius static-field lookup issues
+            intent.putExtra("android.intent.extra.SUBJECT", "Timekeeper CSV Export")
+            intent.putExtra("android.intent.extra.TEXT", csv_text)
             ctx.startActivity(Intent.createChooser(intent, "Share Timekeeper Export"))
         except Exception as e:
-            show_popup("Export Error", str(e))
+            import traceback
+            show_popup("Export Error", traceback.format_exc()[-400:])
 
     # ── UI refresh ──
 
