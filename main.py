@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00008"
+APP_VERSION        = "v0.00009"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -248,10 +248,11 @@ class Storage:
 # ─── Timer Engine ─────────────────────────────────────────────────────────────
 
 class TimerState:
-    IDLE    = "idle"
-    RUNNING = "running"
-    PAUSED  = "paused"
-    BREAK   = "break"
+    IDLE        = "idle"
+    RUNNING     = "running"
+    PAUSED      = "paused"
+    BREAK_READY = "break_ready"  # break loaded but not yet started
+    BREAK       = "break"
 
 
 class TimerEngine:
@@ -305,7 +306,17 @@ class TimerEngine:
             return False
         if self.state == TimerState.PAUSED:
             self._resume()
-        elif self.state in (TimerState.IDLE, TimerState.BREAK):
+        elif self.state == TimerState.BREAK_READY:
+            # User chose to start the break
+            self._run_start_dt = datetime.now()
+            self._start_dt     = datetime.now()
+            self.state         = TimerState.BREAK
+            self._on_tick(0, self._total_secs, self.state)
+            self._schedule()
+        elif self.state == TimerState.BREAK:
+            # Break already running — skip it and start next task
+            self._begin_task()
+        elif self.state == TimerState.IDLE:
             self._begin_task()
         return True
 
@@ -321,13 +332,17 @@ class TimerEngine:
     def stop(self):
         if self.state in (TimerState.RUNNING, TimerState.PAUSED):
             self._record_entry()
-        self._reset()
+            self._preload_break()   # show break arc; user presses Start to begin it
+        elif self.state in (TimerState.BREAK, TimerState.BREAK_READY):
+            self._reset()           # cancel break entirely → back to idle
 
     def sync(self):
         """Call on app resume — refreshes UI from wall-clock state."""
         e = self.elapsed
         self._on_tick(e, self._total_secs, self.state)
-        if self.state in (TimerState.RUNNING, TimerState.BREAK):
+        if self.state == TimerState.BREAK_READY:
+            pass  # clock not running; just refreshed UI above — nothing to schedule
+        elif self.state in (TimerState.RUNNING, TimerState.BREAK):
             if e >= self._total_secs:
                 # Timer expired while backgrounded — trigger completion now
                 self._complete()
@@ -359,6 +374,18 @@ class TimerEngine:
         self.state         = TimerState.RUNNING
         self._on_tick(0, self._total_secs, self.state)  # flip UI to task immediately
         self._schedule()
+
+    def _preload_break(self):
+        """Set up break arc/state without starting the clock (BREAK_READY)."""
+        if self._clock_ev:
+            self._clock_ev.cancel()
+        mins               = int(self._storage.get_setting("break_mins", DEFAULT_BREAK_MINS))
+        self._total_secs   = mins * 60
+        self._accum_secs   = 0
+        self._run_start_dt = None
+        self._start_dt     = None
+        self.state         = TimerState.BREAK_READY
+        self._on_tick(0, self._total_secs, self.state)
 
     def _begin_break(self):
         mins               = int(self._storage.get_setting("break_mins", DEFAULT_BREAK_MINS))
@@ -633,7 +660,7 @@ class ArcTimer(Widget):
                   size=self._redraw, pos=self._redraw)
 
     def _arc_colour(self):
-        if self.state == "break":
+        if self.state in ("break", "break_ready"):
             return C_GREEN
         f = self.fraction
         if f < 0.5:
@@ -672,10 +699,11 @@ class ArcTimer(Widget):
 
         mins = self.total // 60
         state_map = {
-            "idle":    f"{mins} min task",
-            "running": f"{mins} min task",
-            "paused":  "PAUSED",
-            "break":   f"{mins} min break",
+            "idle":        f"{mins} min task",
+            "running":     f"{mins} min task",
+            "paused":      "PAUSED",
+            "break_ready": f"{mins} min break",
+            "break":       f"{mins} min break",
         }
         sub = state_map.get(self.state, "")
         if sub:
@@ -819,6 +847,9 @@ class MainScreen(Screen):
             self._start_btn.background_color = C_ORANGE
         elif state == TimerState.PAUSED:
             self._start_btn.text             = "▶  Resume"
+            self._start_btn.background_color = C_BTN_ACT
+        elif state == TimerState.BREAK_READY:
+            self._start_btn.text             = "▶  Start Break"
             self._start_btn.background_color = C_BTN_ACT
         elif state == TimerState.BREAK:
             self._start_btn.text             = "⏭  Skip Break"
@@ -1400,16 +1431,20 @@ class TimekeeperApp(App):
     def _android_share(self, path):
         try:
             from jnius import autoclass  # type: ignore
-            Intent   = autoclass("android.content.Intent")
+            Intent  = autoclass("android.content.Intent")
+            JString = autoclass("java.lang.String")
             Activity = autoclass("org.kivy.android.PythonActivity")
             ctx      = Activity.mActivity
             with open(path, "r", encoding="utf-8") as f:
                 csv_text = f.read()
             intent = Intent(Intent.ACTION_SEND)
             intent.setType("text/plain")
-            # Use literal key strings — avoids jnius static-field lookup issues
-            intent.putExtra("android.intent.extra.SUBJECT", "Timekeeper CSV Export")
-            intent.putExtra("android.intent.extra.TEXT", csv_text)
+            # Explicit JString cast forces jnius to use putExtra(String, String)
+            # instead of guessing from the many overloaded putExtra signatures
+            intent.putExtra("android.intent.extra.SUBJECT",
+                            JString("Timekeeper CSV Export"))
+            intent.putExtra("android.intent.extra.TEXT",
+                            JString(csv_text))
             ctx.startActivity(Intent.createChooser(intent, "Share Timekeeper Export"))
         except Exception as e:
             import traceback

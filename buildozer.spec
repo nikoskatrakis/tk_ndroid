@@ -6,9 +6,11 @@ package.domain = com.timekeeper
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 
-version = 0.00002
+version = 0.00003
 
 requirements = python3,kivy,android
+
+android.services = Timekeeper:service/main.py
 
 orientation = portrait
 fullscreen = 0
