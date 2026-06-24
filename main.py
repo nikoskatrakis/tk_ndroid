@@ -465,18 +465,22 @@ class TimerEngine:
 # ─── Android Service Manager ──────────────────────────────────────────────────
 
 class ServiceManager:
-    """Starts and stops the background foreground service."""
+    """Starts and stops the Timekeeper foreground service."""
 
     def __init__(self):
         self._service = None
 
     def start(self):
-        if platform != "android":
+        if platform != "android" or self._service:
             return
         try:
-            from android import AndroidService  # type: ignore
-            self._service = AndroidService("Timekeeper Timer", "Timer running in background")
-            self._service.start("start")
+            from jnius import autoclass  # type: ignore
+            # Class name: com.{domain}.{name}.Service{ServiceName}
+            Service  = autoclass("com.timekeeper.timekeeper.ServiceTimekeeper")
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            # Pass DATA_DIR so the service can find timer_state.json
+            Service.start(activity, DATA_DIR)
+            self._service = Service
         except Exception as e:
             print(f"[Service] start error: {e}")
 
@@ -484,7 +488,9 @@ class ServiceManager:
         if platform != "android" or not self._service:
             return
         try:
-            self._service.stop()
+            from jnius import autoclass  # type: ignore
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            self._service.stop(activity)
             self._service = None
         except Exception as e:
             print(f"[Service] stop error: {e}")
@@ -851,11 +857,11 @@ class MainScreen(Screen):
         root.add_widget(self._goal_lbl)
 
         btn_row = BoxLayout(size_hint=(1, None), height=dp(56), spacing=dp(12))
-        self._start_btn = Button(text="▶  Start", font_size=dp(18),
+        self._start_btn = Button(text="Start", font_size=dp(18),
                                  background_normal="", background_color=C_BTN_ACT,
                                  color=C_TEXT)
         self._start_btn.bind(on_release=lambda *a: self._app.on_start_pause())
-        self._stop_btn = Button(text="■  Stop", font_size=dp(18),
+        self._stop_btn = Button(text="Stop", font_size=dp(18),
                                 background_normal="", background_color=C_RED,
                                 color=C_TEXT)
         self._stop_btn.bind(on_release=lambda *a: self._app.on_stop())
@@ -874,22 +880,22 @@ class MainScreen(Screen):
         self._task_lbl.text = task_name or "No task — open menu"
         self._goal_lbl.text = f"Today: {goal_done} / {goal_total} intervals"
         if state == TimerState.RUNNING:
-            self._start_btn.text             = "⏸  Pause"
+            self._start_btn.text             = "Pause"
             self._start_btn.background_color = C_ORANGE
         elif state == TimerState.PAUSED:
-            self._start_btn.text             = "▶  Resume"
+            self._start_btn.text             = "Resume"
             self._start_btn.background_color = C_BTN_ACT
         elif state == TimerState.BREAK_READY:
-            self._start_btn.text             = "▶  Start Break"
+            self._start_btn.text             = "Start Break"
             self._start_btn.background_color = C_BTN_ACT
         elif state == TimerState.BREAK:
-            self._start_btn.text             = "⏸  Pause Break"
+            self._start_btn.text             = "Pause Break"
             self._start_btn.background_color = C_ORANGE
         elif state == TimerState.BREAK_PAUSED:
-            self._start_btn.text             = "▶  Resume Break"
+            self._start_btn.text             = "Resume Break"
             self._start_btn.background_color = C_BTN_ACT
         else:
-            self._start_btn.text             = "▶  Start"
+            self._start_btn.text             = "Start"
             self._start_btn.background_color = C_BTN_ACT
 
 
@@ -1483,7 +1489,7 @@ class TimekeeperApp(App):
         self._play_alert(state)
         self._write_timer_state()
         if state == TimerState.RUNNING:
-            show_popup("Interval complete!", "Press  ▶ Start Break  when ready.")
+            show_popup("Interval complete!", "Press  Start Break  when ready.")
         elif state == TimerState.BREAK:
             show_popup("Break over!", "Ready for next interval.")
             self._svc_manager.stop()
