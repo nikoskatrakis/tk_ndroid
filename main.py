@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00012"
+APP_VERSION        = "v0.00013"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -918,6 +918,7 @@ class MenuScreen(Screen):
             ("🎤  Voice Commands",  self._app.go_shortcuts),
             ("ℹ️  About",           self._app.go_about),
             ("← Back",             self._app.go_main),
+            ("✖  Quit",            self._app.stop),
         ]
         for label, cb in items:
             root.add_widget(make_button(label, cb, height=dp(52)))
@@ -1161,6 +1162,8 @@ class SettingsScreen(Screen):
             val = ti.text.strip()
             if val.isdigit() and int(val) > 0:
                 self._app.storage.set_setting(key, val)
+        # Refresh main screen so idle arc shows the new task duration immediately
+        self._app._refresh_main()
         show_popup("Saved", "Settings saved.", on_dismiss=self._app.go_menu)
 
 
@@ -1282,6 +1285,7 @@ class TimekeeperApp(App):
         self._write_timer_state()
         if self.engine.state in (TimerState.RUNNING, TimerState.BREAK, TimerState.BREAK_PAUSED):
             self._svc_manager.start()
+            self._acquire_wake_lock()
         return True
 
     def on_resume(self):
@@ -1290,6 +1294,34 @@ class TimekeeperApp(App):
         self._refresh_main()
         if self.engine.state == TimerState.IDLE:
             self._svc_manager.stop()
+
+    def _acquire_wake_lock(self):
+        if platform != "android":
+            return
+        try:
+            from jnius import autoclass
+            from android import AndroidService  # noqa — ensures android is importable
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            PowerManager   = autoclass('android.os.PowerManager')
+            ctx = PythonActivity.mActivity
+            pm  = ctx.getSystemService(ctx.POWER_SERVICE)
+            wl  = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
+                                  "Timekeeper::TimerWakeLock")
+            if not wl.isHeld():
+                wl.acquire()
+            self._wake_lock = wl
+        except Exception as e:
+            print(f"[WakeLock] acquire error: {e}")
+
+    def _release_wake_lock(self):
+        wl = getattr(self, '_wake_lock', None)
+        if wl:
+            try:
+                if wl.isHeld():
+                    wl.release()
+            except Exception as e:
+                print(f"[WakeLock] release error: {e}")
+            self._wake_lock = None
 
     # ── Timer state file ──
 
@@ -1381,7 +1413,7 @@ class TimekeeperApp(App):
     def _on_tick(self, elapsed, total, state):
         self._refresh_main(elapsed=elapsed, total=total, state=state)
 
-    def _play_alert(self):
+    def _play_alert(self, finished_state=None):
         if platform != "android":
             return
         try:
@@ -1398,7 +1430,14 @@ class TimekeeperApp(App):
 
             context = PythonActivity.mActivity
 
-            # ── Notification (visible on lock screen, plays default channel sound) ──
+            # Pick sound type and notification text based on which timer finished
+            is_break_end = (finished_state == TimerState.BREAK)
+            sound_type   = (RingtoneManager.TYPE_RINGTONE if is_break_end
+                            else RingtoneManager.TYPE_ALARM)
+            notif_text   = ("Break over — ready for next interval!"
+                            if is_break_end else "Interval complete — well done!")
+
+            # ── Notification (visible on lock screen) ──
             nm = context.getSystemService(context.NOTIFICATION_SERVICE)
             ch = NotificationChannel(
                 JString("tk_alert"), JString("Timekeeper Alert"),
@@ -1409,16 +1448,18 @@ class TimekeeperApp(App):
             b = Builder(context, JString("tk_alert"))
             b.setSmallIcon(context.getApplicationInfo().icon)
             b.setContentTitle(JString("Timekeeper"))
-            b.setContentText(JString("Timer complete — well done!"))
+            b.setContentText(JString(notif_text))
             b.setAutoCancel(True)
             nm.notify(3, b.build())
 
-            # ── MediaPlayer with STREAM_ALARM — works even when app is backgrounded ──
-            uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            # ── MediaPlayer with STREAM_ALARM keeps audio focus when screen is off ──
+            audio_stream = (AudioManager.STREAM_RING if is_break_end
+                            else AudioManager.STREAM_ALARM)
+            uri = RingtoneManager.getDefaultUri(sound_type)
             if uri is None:
-                uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
             mp = MediaPlayer()
-            mp.setAudioStreamType(AudioManager.STREAM_ALARM)
+            mp.setAudioStreamType(audio_stream)
             mp.setDataSource(context, uri)
             mp.prepare()
             mp.start()
@@ -1436,16 +1477,15 @@ class TimekeeperApp(App):
             except Exception:
                 pass
             self._alert_ringtone = None
+        self._release_wake_lock()   # sound finished — safe to let CPU sleep now
 
     def _on_complete(self, state):
-        self._play_alert()
+        self._play_alert(state)
         self._write_timer_state()
         if state == TimerState.RUNNING:
-            show_popup("Interval complete!", "Starting break…",
-                       on_dismiss=self._stop_alert)
+            show_popup("Interval complete!", "Press  ▶ Start Break  when ready.")
         elif state == TimerState.BREAK:
-            show_popup("Break over!", "Ready for next interval.",
-                       on_dismiss=self._stop_alert)
+            show_popup("Break over!", "Ready for next interval.")
             self._svc_manager.stop()
 
     # ── Voice ──
