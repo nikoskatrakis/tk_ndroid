@@ -1279,8 +1279,10 @@ class TimekeeperApp(App):
         self._refresh_main()
         # Refresh interval counter every 60 s so it resets properly at midnight
         Clock.schedule_interval(lambda dt: self._refresh_main(), 60)
-        # Ask Android to exempt us from battery optimisation (needed for AlarmManager on OEM skins)
+        # Ask Android to exempt us from battery optimisation + grant exact alarm permission.
+        # Both must happen while the app is in the foreground (not during on_pause).
         Clock.schedule_once(lambda dt: self._request_battery_exemption(), 2)
+        Clock.schedule_once(lambda dt: self._request_exact_alarm_permission(), 4)
         return self.sm
 
     # ── Android lifecycle ──
@@ -1348,19 +1350,6 @@ class TimekeeperApp(App):
             am         = ctx.getSystemService(ctx.ALARM_SERVICE)
             trigger_ms = int(finish_at * 1000)
 
-            # Android 12 devices: SCHEDULE_EXACT_ALARM needs user approval in Settings.
-            # Android 13+ devices: USE_EXACT_ALARM is auto-granted for timer apps.
-            # canScheduleExactAlarms() tells us which situation we're in.
-            if not am.canScheduleExactAlarms():
-                print("[Alarm] exact alarm not permitted — redirecting to Settings")
-                Settings  = autoclass('android.provider.Settings')
-                Uri       = autoclass('android.net.Uri')
-                pkg       = ctx.getPackageName()
-                i = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
-                i.setData(Uri.parse(JString(f"package:{pkg}")))
-                ctx.startActivity(i)
-                return
-
             am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger_ms, pi)
 
             self._alarm_pi = pi
@@ -1412,6 +1401,34 @@ class TimekeeperApp(App):
                 ctx.startActivity(intent)
         except Exception as e:
             print(f"[BatteryOpt] error: {e}")
+
+    def _request_exact_alarm_permission(self):
+        """On Android 12 devices, exact alarms need user approval in Settings.
+        On Android 13+, USE_EXACT_ALARM is auto-granted — this will be a no-op.
+        Must be called while the app is in the foreground."""
+        if platform != "android":
+            return
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            AlarmManager   = autoclass('android.app.AlarmManager')
+            Intent         = autoclass('android.content.Intent')
+            Settings       = autoclass('android.provider.Settings')
+            Uri            = autoclass('android.net.Uri')
+            JString        = autoclass('java.lang.String')
+
+            ctx = PythonActivity.mActivity
+            am  = ctx.getSystemService(ctx.ALARM_SERVICE)
+
+            if not am.canScheduleExactAlarms():
+                print("[Alarm] requesting exact alarm permission via Settings")
+                intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                intent.setData(Uri.parse(JString(f"package:{ctx.getPackageName()}")))
+                ctx.startActivity(intent)
+            else:
+                print("[Alarm] exact alarm permission already granted")
+        except Exception as e:
+            print(f"[Alarm] permission request error: {e}")
 
     # ── Timer state file ──
 
