@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00009"
+APP_VERSION        = "v0.00010"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -248,11 +248,12 @@ class Storage:
 # ─── Timer Engine ─────────────────────────────────────────────────────────────
 
 class TimerState:
-    IDLE        = "idle"
-    RUNNING     = "running"
-    PAUSED      = "paused"
-    BREAK_READY = "break_ready"  # break loaded but not yet started
-    BREAK       = "break"
+    IDLE         = "idle"
+    RUNNING      = "running"
+    PAUSED       = "paused"
+    BREAK_READY  = "break_ready"   # break loaded but not yet started
+    BREAK        = "break"
+    BREAK_PAUSED = "break_paused"  # break clock paused mid-break
 
 
 class TimerEngine:
@@ -314,8 +315,18 @@ class TimerEngine:
             self._on_tick(0, self._total_secs, self.state)
             self._schedule()
         elif self.state == TimerState.BREAK:
-            # Break already running — skip it and start next task
-            self._begin_task()
+            # Pause the break
+            self._accum_secs   = self.elapsed
+            self._run_start_dt = None
+            self.state         = TimerState.BREAK_PAUSED
+            if self._clock_ev:
+                self._clock_ev.cancel()
+            self._on_tick(self._accum_secs, self._total_secs, self.state)
+        elif self.state == TimerState.BREAK_PAUSED:
+            # Resume the break
+            self._run_start_dt = datetime.now()
+            self.state         = TimerState.BREAK
+            self._schedule()
         elif self.state == TimerState.IDLE:
             self._begin_task()
         return True
@@ -333,14 +344,14 @@ class TimerEngine:
         if self.state in (TimerState.RUNNING, TimerState.PAUSED):
             self._record_entry()
             self._preload_break()   # show break arc; user presses Start to begin it
-        elif self.state in (TimerState.BREAK, TimerState.BREAK_READY):
+        elif self.state in (TimerState.BREAK, TimerState.BREAK_PAUSED, TimerState.BREAK_READY):
             self._reset()           # cancel break entirely → back to idle
 
     def sync(self):
         """Call on app resume — refreshes UI from wall-clock state."""
         e = self.elapsed
         self._on_tick(e, self._total_secs, self.state)
-        if self.state == TimerState.BREAK_READY:
+        if self.state in (TimerState.BREAK_READY, TimerState.BREAK_PAUSED):
             pass  # clock not running; just refreshed UI above — nothing to schedule
         elif self.state in (TimerState.RUNNING, TimerState.BREAK):
             if e >= self._total_secs:
@@ -660,7 +671,7 @@ class ArcTimer(Widget):
                   size=self._redraw, pos=self._redraw)
 
     def _arc_colour(self):
-        if self.state in ("break", "break_ready"):
+        if self.state in ("break", "break_ready", "break_paused"):
             return C_GREEN
         f = self.fraction
         if f < 0.5:
@@ -699,11 +710,12 @@ class ArcTimer(Widget):
 
         mins = self.total // 60
         state_map = {
-            "idle":        f"{mins} min task",
-            "running":     f"{mins} min task",
-            "paused":      "PAUSED",
-            "break_ready": f"{mins} min break",
-            "break":       f"{mins} min break",
+            "idle":         f"{mins} min task",
+            "running":      f"{mins} min task",
+            "paused":       "PAUSED",
+            "break_ready":  f"{mins} min break",
+            "break":        f"{mins} min break",
+            "break_paused": f"{mins} min break",
         }
         sub = state_map.get(self.state, "")
         if sub:
@@ -852,8 +864,11 @@ class MainScreen(Screen):
             self._start_btn.text             = "▶  Start Break"
             self._start_btn.background_color = C_BTN_ACT
         elif state == TimerState.BREAK:
-            self._start_btn.text             = "⏭  Skip Break"
-            self._start_btn.background_color = C_BTN
+            self._start_btn.text             = "⏸  Pause Break"
+            self._start_btn.background_color = C_ORANGE
+        elif state == TimerState.BREAK_PAUSED:
+            self._start_btn.text             = "▶  Resume Break"
+            self._start_btn.background_color = C_BTN_ACT
         else:
             self._start_btn.text             = "▶  Start"
             self._start_btn.background_color = C_BTN_ACT
@@ -1234,6 +1249,8 @@ class TimekeeperApp(App):
             Clock.schedule_once(lambda dt: self._prompt_first_task(), 0.5)
 
         self._refresh_main()
+        # Refresh interval counter every 60 s so it resets properly at midnight
+        Clock.schedule_interval(lambda dt: self._refresh_main(), 60)
         return self.sm
 
     # ── Android lifecycle ──
@@ -1244,7 +1261,7 @@ class TimekeeperApp(App):
         Write state to file so the background service can read it.
         """
         self._write_timer_state()
-        if self.engine.state in (TimerState.RUNNING, TimerState.BREAK):
+        if self.engine.state in (TimerState.RUNNING, TimerState.BREAK, TimerState.BREAK_PAUSED):
             self._svc_manager.start()
         return True
 
@@ -1438,14 +1455,12 @@ class TimekeeperApp(App):
             with open(path, "r", encoding="utf-8") as f:
                 csv_text = f.read()
             intent = Intent(Intent.ACTION_SEND)
-            intent.setType("text/plain")
-            # Explicit JString cast forces jnius to use putExtra(String, String)
-            # instead of guessing from the many overloaded putExtra signatures
-            intent.putExtra("android.intent.extra.SUBJECT",
-                            JString("Timekeeper CSV Export"))
-            intent.putExtra("android.intent.extra.TEXT",
-                            JString(csv_text))
-            ctx.startActivity(Intent.createChooser(intent, "Share Timekeeper Export"))
+            intent.setType(JString("text/plain"))
+            # Use Intent constants for keys + JString for values to avoid
+            # jnius overload-resolution errors on putExtra(String, String)
+            intent.putExtra(Intent.EXTRA_SUBJECT, JString("Timekeeper CSV Export"))
+            intent.putExtra(Intent.EXTRA_TEXT,    JString(csv_text))
+            ctx.startActivity(Intent.createChooser(intent, JString("Share Timekeeper Export")))
         except Exception as e:
             import traceback
             show_popup("Export Error", traceback.format_exc()[-400:])
