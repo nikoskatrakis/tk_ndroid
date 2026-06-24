@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00010"
+APP_VERSION        = "v0.00011"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -790,6 +790,23 @@ def show_input_popup(title, hint, on_confirm, prefill=""):
 
 # ─── Screens ──────────────────────────────────────────────────────────────────
 
+class HamburgerButton(Button):
+    """A button that draws three horizontal bars (hamburger icon) on its canvas."""
+    def __init__(self, **kwargs):
+        super().__init__(text="", **kwargs)
+        self.bind(pos=self._redraw, size=self._redraw)
+
+    def _redraw(self, *_):
+        self.canvas.after.clear()
+        cx, cy = self.center_x, self.center_y
+        w, h = dp(20), dp(2.5)
+        gaps = [dp(6), 0, -dp(6)]
+        with self.canvas.after:
+            Color(1, 1, 1, 1)
+            for offset in gaps:
+                Rectangle(pos=(cx - w / 2, cy + offset - h / 2), size=(w, h))
+
+
 class MainScreen(Screen):
     def __init__(self, app, **kwargs):
         super().__init__(name="main", **kwargs)
@@ -806,9 +823,9 @@ class MainScreen(Screen):
 
         # Top bar: menu | task name | version
         top = BoxLayout(size_hint=(1, None), height=dp(48), spacing=dp(8))
-        menu_btn = Button(text="☰", size_hint=(None, 1), width=dp(48),
-                          font_size=dp(22), background_normal="",
-                          background_color=C_BTN, color=C_TEXT)
+        menu_btn = HamburgerButton(size_hint=(None, 1), width=dp(48),
+                                   background_normal="",
+                                   background_color=C_BTN)
         menu_btn.bind(on_release=lambda *a: self._app.go_menu())
         self._task_lbl = Label(text="No task — open menu",
                                font_size=dp(17), bold=True,
@@ -1235,9 +1252,9 @@ class TimekeeperApp(App):
         ]:
             self.sm.add_widget(s)
 
-        # Initialise voice AFTER build (needs UI thread + activity ready)
-        Clock.schedule_once(lambda dt: self.voice.setup(), 1)
-        Clock.schedule_once(lambda dt: self.voice.start_listening(), 3)
+        # Voice disabled temporarily — crashes the app on some devices
+        # Clock.schedule_once(lambda dt: self.voice.setup(), 1)
+        # Clock.schedule_once(lambda dt: self.voice.start_listening(), 3)
 
         tasks = self.storage.get_tasks()
         if tasks:
