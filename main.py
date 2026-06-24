@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00015"
+APP_VERSION        = "v0.00016"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -1555,7 +1555,6 @@ class TimekeeperApp(App):
             except Exception:
                 pass
             self._alert_ringtone = None
-        self._release_wake_lock()   # sound finished — safe to let CPU sleep now
 
     def _on_complete(self, state):
         try:

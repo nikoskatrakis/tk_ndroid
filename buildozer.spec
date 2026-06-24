@@ -6,7 +6,7 @@ package.domain = com.timekeeper
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 
-version = 0.00005
+version = 0.00006
 
 requirements = python3,kivy,android
 
