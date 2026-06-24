@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00014"
+APP_VERSION        = "v0.00015"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -1286,16 +1286,25 @@ class TimekeeperApp(App):
     # ── Android lifecycle ──
 
     def on_pause(self):
-        """Allow app to pause; schedule an exact alarm so the sound fires
-        even when the screen is locked and the process is frozen."""
+        """Allow app to pause.
+        Belt-and-braces: foreground service keeps the process alive so Python
+        can sleep until completion; AlarmManager is the hard backstop if the
+        OS kills the process anyway."""
         self._write_timer_state()
         if self.engine.state in (TimerState.RUNNING, TimerState.BREAK):
-            self._schedule_alarm()
+            self._svc_manager.start()   # keep process alive + show persistent notif
+            self._schedule_alarm()      # fire even if process is killed
         return True
 
     def on_resume(self):
-        """Cancel any pending alarm (app is open, it handles completion itself)."""
+        """Cancel any pending alarm (app handles completion itself when open)."""
         self._cancel_alarm()
+        self._svc_manager.stop()
+        # Defer sync by 0.5 s — jnius / mActivity are unreliable immediately
+        # after the app comes back to the foreground; defer avoids a startup crash.
+        Clock.schedule_once(lambda dt: self._deferred_resume(), 0.5)
+
+    def _deferred_resume(self, *_):
         self.engine.sync()
         self._refresh_main()
 
@@ -1549,15 +1558,21 @@ class TimekeeperApp(App):
         self._release_wake_lock()   # sound finished — safe to let CPU sleep now
 
     def _on_complete(self, state):
-        self._play_alert(state)
+        try:
+            self._play_alert(state)
+        except Exception as e:
+            print(f"[Complete] alert error (non-fatal): {e}")
         self._write_timer_state()
-        if state == TimerState.RUNNING:
-            show_popup("Interval complete!", "Press  Start Break  when ready.",
-                       on_dismiss=self._stop_alert)
-        elif state == TimerState.BREAK:
-            show_popup("Break over!", "Ready for next interval.",
-                       on_dismiss=self._stop_alert)
-            self._svc_manager.stop()
+        try:
+            if state == TimerState.RUNNING:
+                show_popup("Interval complete!", "Press  Start Break  when ready.",
+                           on_dismiss=self._stop_alert)
+            elif state == TimerState.BREAK:
+                show_popup("Break over!", "Ready for next interval.",
+                           on_dismiss=self._stop_alert)
+                self._svc_manager.stop()
+        except Exception as e:
+            print(f"[Complete] popup error (non-fatal): {e}")
 
     # ── Voice ──
 
