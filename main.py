@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00013"
+APP_VERSION        = "v0.00014"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -1279,55 +1279,116 @@ class TimekeeperApp(App):
         self._refresh_main()
         # Refresh interval counter every 60 s so it resets properly at midnight
         Clock.schedule_interval(lambda dt: self._refresh_main(), 60)
+        # Ask Android to exempt us from battery optimisation (needed for AlarmManager on OEM skins)
+        Clock.schedule_once(lambda dt: self._request_battery_exemption(), 2)
         return self.sm
 
     # ── Android lifecycle ──
 
     def on_pause(self):
-        """
-        Allow app to pause. The wall-clock engine keeps elapsed time accurate.
-        Write state to file so the background service can read it.
-        """
+        """Allow app to pause; schedule an exact alarm so the sound fires
+        even when the screen is locked and the process is frozen."""
         self._write_timer_state()
-        if self.engine.state in (TimerState.RUNNING, TimerState.BREAK, TimerState.BREAK_PAUSED):
-            self._svc_manager.start()
-            self._acquire_wake_lock()
+        if self.engine.state in (TimerState.RUNNING, TimerState.BREAK):
+            self._schedule_alarm()
         return True
 
     def on_resume(self):
-        """Sync UI from wall clock after returning from background."""
+        """Cancel any pending alarm (app is open, it handles completion itself)."""
+        self._cancel_alarm()
         self.engine.sync()
         self._refresh_main()
-        if self.engine.state == TimerState.IDLE:
-            self._svc_manager.stop()
 
-    def _acquire_wake_lock(self):
+    # ── AlarmManager — the only reliable way to fire code while screen is locked ──
+
+    def _schedule_alarm(self):
+        """Schedule setExactAndAllowWhileIdle() to start the service at timer completion.
+        This bypasses Doze mode and OEM battery killers."""
+        if platform != "android":
+            return
+        try:
+            import time as _time
+            from jnius import autoclass
+
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            AlarmManager   = autoclass('android.app.AlarmManager')
+            PendingIntent  = autoclass('android.app.PendingIntent')
+            Intent         = autoclass('android.content.Intent')
+            ComponentName  = autoclass('android.content.ComponentName')
+            JString        = autoclass('java.lang.String')
+
+            ctx       = PythonActivity.mActivity
+            is_break  = (self.engine.state == TimerState.BREAK)
+            finish_at = _time.time() + self.engine.remaining
+
+            # Write alert metadata for the service to read on wakeup
+            import json as _json
+            alert_path = os.path.join(DATA_DIR, "pending_alert.json")
+            with open(alert_path, "w") as f:
+                _json.dump({"is_break": is_break, "finish_at": finish_at}, f)
+
+            # Intent targeting ServiceTimekeeper (declared in buildozer.spec)
+            cn     = ComponentName(JString("com.timekeeper.timekeeper"),
+                                   JString("com.timekeeper.timekeeper.ServiceTimekeeper"))
+            intent = Intent()
+            intent.setComponent(cn)
+
+            flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+            pi = PendingIntent.getService(ctx, 99, intent, flags)
+
+            am          = ctx.getSystemService(ctx.ALARM_SERVICE)
+            trigger_ms  = int(finish_at * 1000)
+            am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger_ms, pi)
+
+            self._alarm_pi = pi
+            print(f"[Alarm] scheduled in {self.engine.remaining:.0f}s")
+        except Exception as e:
+            print(f"[Alarm] schedule error: {e}")
+
+    def _cancel_alarm(self):
+        """Cancel the pending alarm when the app is back in the foreground."""
+        if platform != "android":
+            return
+        try:
+            pi = getattr(self, "_alarm_pi", None)
+            if pi:
+                from jnius import autoclass
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                ctx = PythonActivity.mActivity
+                am  = ctx.getSystemService(ctx.ALARM_SERVICE)
+                am.cancel(pi)
+                self._alarm_pi = None
+            # Clear alert file — app will handle completion itself via sync()
+            alert_path = os.path.join(DATA_DIR, "pending_alert.json")
+            if os.path.exists(alert_path):
+                os.remove(alert_path)
+        except Exception as e:
+            print(f"[Alarm] cancel error: {e}")
+
+    def _request_battery_exemption(self):
+        """Ask Android to exempt Timekeeper from battery optimisation.
+        Without this, OEM skins (Samsung, Xiaomi, etc.) may still kill alarms."""
         if platform != "android":
             return
         try:
             from jnius import autoclass
-            from android import AndroidService  # noqa — ensures android is importable
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
             PowerManager   = autoclass('android.os.PowerManager')
+            Intent         = autoclass('android.content.Intent')
+            Settings       = autoclass('android.provider.Settings')
+            Uri            = autoclass('android.net.Uri')
+            JString        = autoclass('java.lang.String')
+
             ctx = PythonActivity.mActivity
             pm  = ctx.getSystemService(ctx.POWER_SERVICE)
-            wl  = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
-                                  "Timekeeper::TimerWakeLock")
-            if not wl.isHeld():
-                wl.acquire()
-            self._wake_lock = wl
-        except Exception as e:
-            print(f"[WakeLock] acquire error: {e}")
+            pkg = ctx.getPackageName()
 
-    def _release_wake_lock(self):
-        wl = getattr(self, '_wake_lock', None)
-        if wl:
-            try:
-                if wl.isHeld():
-                    wl.release()
-            except Exception as e:
-                print(f"[WakeLock] release error: {e}")
-            self._wake_lock = None
+            if not pm.isIgnoringBatteryOptimizations(pkg):
+                intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                intent.setData(Uri.parse(JString(f"package:{pkg}")))
+                ctx.startActivity(intent)
+        except Exception as e:
+            print(f"[BatteryOpt] error: {e}")
 
     # ── Timer state file ──
 
@@ -1466,11 +1527,13 @@ class TimekeeperApp(App):
                 uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
             mp = MediaPlayer()
             mp.setAudioStreamType(audio_stream)
+            mp.setLooping(False)          # prevent alarm tones from looping forever
             mp.setDataSource(context, uri)
             mp.prepare()
             mp.start()
             self._alert_ringtone = mp
-            Clock.schedule_once(lambda dt: self._stop_alert(), 6)
+            # Auto-stop after 8 s as a safety net; OK button also stops it immediately
+            Clock.schedule_once(lambda dt: self._stop_alert(), 8)
         except Exception as e:
             print(f"[Alert] sound error: {e}")
 
@@ -1489,9 +1552,11 @@ class TimekeeperApp(App):
         self._play_alert(state)
         self._write_timer_state()
         if state == TimerState.RUNNING:
-            show_popup("Interval complete!", "Press  Start Break  when ready.")
+            show_popup("Interval complete!", "Press  Start Break  when ready.",
+                       on_dismiss=self._stop_alert)
         elif state == TimerState.BREAK:
-            show_popup("Break over!", "Ready for next interval.")
+            show_popup("Break over!", "Ready for next interval.",
+                       on_dismiss=self._stop_alert)
             self._svc_manager.stop()
 
     # ── Voice ──
