@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00016"
+APP_VERSION        = "v0.00017"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -1345,8 +1345,22 @@ class TimekeeperApp(App):
             flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
             pi = PendingIntent.getService(ctx, 99, intent, flags)
 
-            am          = ctx.getSystemService(ctx.ALARM_SERVICE)
-            trigger_ms  = int(finish_at * 1000)
+            am         = ctx.getSystemService(ctx.ALARM_SERVICE)
+            trigger_ms = int(finish_at * 1000)
+
+            # Android 12 devices: SCHEDULE_EXACT_ALARM needs user approval in Settings.
+            # Android 13+ devices: USE_EXACT_ALARM is auto-granted for timer apps.
+            # canScheduleExactAlarms() tells us which situation we're in.
+            if not am.canScheduleExactAlarms():
+                print("[Alarm] exact alarm not permitted — redirecting to Settings")
+                Settings  = autoclass('android.provider.Settings')
+                Uri       = autoclass('android.net.Uri')
+                pkg       = ctx.getPackageName()
+                i = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                i.setData(Uri.parse(JString(f"package:{pkg}")))
+                ctx.startActivity(i)
+                return
+
             am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger_ms, pi)
 
             self._alarm_pi = pi
