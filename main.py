@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00011"
+APP_VERSION        = "v0.00012"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -428,7 +428,7 @@ class TimerEngine:
         finished = self.state
         if finished == TimerState.RUNNING:
             self._record_entry()
-            self._begin_break()       # state = BREAK before popup opens
+            self._preload_break()     # show break arc but don't start clock yet
             self._on_complete(finished)
         elif finished == TimerState.BREAK:
             self._reset()             # state = IDLE before popup opens
@@ -782,9 +782,11 @@ def show_input_popup(title, hint, on_confirm, prefill=""):
     row.add_widget(make_button("Cancel", popup.dismiss))
     row.add_widget(make_button("OK", _confirm, bg=C_BTN_ACT))
     content.add_widget(row)
-    popup.bind(on_open=lambda *a: Clock.schedule_once(
-        lambda dt: setattr(ti, 'focus', True), 0.1
-    ))
+    def _focus_input(*_):
+        # Two attempts: 0.3 s for normal use, 0.8 s as fallback for first launch
+        Clock.schedule_once(lambda dt: setattr(ti, 'focus', True), 0.3)
+        Clock.schedule_once(lambda dt: setattr(ti, 'focus', True), 0.8)
+    popup.bind(on_open=_focus_input)
     popup.open()
 
 
@@ -1384,8 +1386,11 @@ class TimekeeperApp(App):
             return
         try:
             from jnius import autoclass
+            JString             = autoclass('java.lang.String')
             PythonActivity      = autoclass('org.kivy.android.PythonActivity')
             RingtoneManager     = autoclass('android.media.RingtoneManager')
+            MediaPlayer         = autoclass('android.media.MediaPlayer')
+            AudioManager        = autoclass('android.media.AudioManager')
             NotificationManager = autoclass('android.app.NotificationManager')
             NotificationChannel = autoclass('android.app.NotificationChannel')
             Notification        = autoclass('android.app.Notification')
@@ -1393,37 +1398,41 @@ class TimekeeperApp(App):
 
             context = PythonActivity.mActivity
 
-            # ── Notification (plays sound even on lock screen) ──
+            # ── Notification (visible on lock screen, plays default channel sound) ──
             nm = context.getSystemService(context.NOTIFICATION_SERVICE)
             ch = NotificationChannel(
-                "tk_alert", "Timekeeper Alert", NotificationManager.IMPORTANCE_HIGH
+                JString("tk_alert"), JString("Timekeeper Alert"),
+                NotificationManager.IMPORTANCE_HIGH
             )
             ch.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC)
             nm.createNotificationChannel(ch)
-            b = Builder(context, "tk_alert")
+            b = Builder(context, JString("tk_alert"))
             b.setSmallIcon(context.getApplicationInfo().icon)
-            b.setContentTitle("Timekeeper")
-            b.setContentText("Timer complete — well done!")
+            b.setContentTitle(JString("Timekeeper"))
+            b.setContentText(JString("Timer complete — well done!"))
             b.setAutoCancel(True)
             nm.notify(3, b.build())
 
-            # ── Alarm ringtone (more dramatic; auto-stops after 5s or on popup dismiss) ──
+            # ── MediaPlayer with STREAM_ALARM — works even when app is backgrounded ──
             uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             if uri is None:
                 uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-            ringtone = RingtoneManager.getRingtone(context, uri)
-            if ringtone:
-                ringtone.play()
-                self._alert_ringtone = ringtone
-                Clock.schedule_once(lambda dt: self._stop_alert(), 5)
+            mp = MediaPlayer()
+            mp.setAudioStreamType(AudioManager.STREAM_ALARM)
+            mp.setDataSource(context, uri)
+            mp.prepare()
+            mp.start()
+            self._alert_ringtone = mp
+            Clock.schedule_once(lambda dt: self._stop_alert(), 6)
         except Exception as e:
             print(f"[Alert] sound error: {e}")
 
     def _stop_alert(self, *args):
-        r = getattr(self, '_alert_ringtone', None)
-        if r:
+        mp = getattr(self, '_alert_ringtone', None)
+        if mp:
             try:
-                r.stop()
+                mp.stop()
+                mp.release()
             except Exception:
                 pass
             self._alert_ringtone = None
