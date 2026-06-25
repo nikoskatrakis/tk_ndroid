@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00019"
+APP_VERSION        = "v0.00020"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -1327,7 +1327,12 @@ class TimekeeperApp(App):
         Clock.schedule_once(lambda dt: self._deferred_resume(), 0.5)
 
     def _deferred_resume(self, *_):
+        # Service already played sound while locked — don't replay it on resume.
+        # Flag is cleared immediately after sync() returns (sync calls _on_complete
+        # synchronously when the timer has expired).
+        self._skip_alert_sound = True
         self.engine.sync()
+        self._skip_alert_sound = False
         self._refresh_main()
 
     # ── AlarmManager — the only reliable way to fire code while screen is locked ──
@@ -1616,10 +1621,11 @@ class TimekeeperApp(App):
             self._alert_ringtone = None
 
     def _on_complete(self, state):
-        try:
-            self._play_alert(state)
-        except Exception as e:
-            print(f"[Complete] alert error (non-fatal): {e}")
+        if not getattr(self, '_skip_alert_sound', False):
+            try:
+                self._play_alert(state)
+            except Exception as e:
+                print(f"[Complete] alert error (non-fatal): {e}")
         self._write_timer_state()
         try:
             if state == TimerState.RUNNING:
