@@ -10,7 +10,7 @@ version = 0.00008
 
 requirements = python3,kivy,android
 
-android.services = Timekeeper:service/main.py:foreground
+android.services = Timekeeper:service/main.py
 
 orientation = portrait
 fullscreen = 0
