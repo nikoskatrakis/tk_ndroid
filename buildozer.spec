@@ -10,7 +10,8 @@ version = 0.00008
 
 requirements = python3,kivy,android
 
-services = Timekeeper:service/main.py
+# No named service needed — PythonService (always in bootstrap) is targeted directly
+# p4a auto-detects service/main.py and declares PythonService in the manifest
 
 orientation = portrait
 fullscreen = 0

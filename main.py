@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00018"
+APP_VERSION        = "v0.00019"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -465,33 +465,53 @@ class TimerEngine:
 # ─── Android Service Manager ──────────────────────────────────────────────────
 
 class ServiceManager:
-    """Starts and stops the Timekeeper foreground service."""
+    """Starts and stops the background service via PythonService (always in APK)."""
 
     def __init__(self):
-        self._service = None
+        self._started = False
+
+    def _make_intent(self, ctx, argument):
+        from jnius import autoclass  # type: ignore
+        PythonService = autoclass('org.kivy.android.PythonService')
+        Intent        = autoclass('android.content.Intent')
+        JString       = autoclass('java.lang.String')
+        android_private = ctx.getFilesDir().getAbsolutePath()
+        app_root        = android_private + '/app'
+        intent = Intent(ctx, PythonService)
+        intent.putExtra(JString('androidPrivate'),          JString(android_private))
+        intent.putExtra(JString('androidArgument'),         JString(app_root))
+        intent.putExtra(JString('serviceEntrypoint'),       JString('service/main.py'))
+        intent.putExtra(JString('pythonName'),              JString('python'))
+        intent.putExtra(JString('serviceStartAsForeground'),JString('false'))
+        intent.putExtra(JString('serviceTitle'),            JString('Timekeeper'))
+        intent.putExtra(JString('pythonHome'),              JString(app_root))
+        intent.putExtra(JString('pythonPath'),              JString(app_root + ':' + app_root + '/lib'))
+        intent.putExtra(JString('pythonServiceArgument'),   JString(argument))
+        return intent
 
     def start(self):
-        if platform != "android" or self._service:
+        if platform != "android" or self._started:
             return
         try:
             from jnius import autoclass  # type: ignore
-            # Class name: com.{domain}.{name}.Service{ServiceName}
-            Service  = autoclass("com.timekeeper.timekeeper.ServiceTimekeeper")
-            activity = autoclass("org.kivy.android.PythonActivity").mActivity
-            # Pass DATA_DIR so the service can find timer_state.json
-            Service.start(activity, DATA_DIR)
-            self._service = Service
+            ctx = autoclass('org.kivy.android.PythonActivity').mActivity
+            ctx.startService(self._make_intent(ctx, DATA_DIR))
+            self._started = True
+            self._ctx = ctx
+            print('[Service] PythonService started')
         except Exception as e:
             print(f"[Service] start error: {e}")
 
     def stop(self):
-        if platform != "android" or not self._service:
+        if platform != "android" or not self._started:
             return
         try:
             from jnius import autoclass  # type: ignore
-            activity = autoclass("org.kivy.android.PythonActivity").mActivity
-            self._service.stop(activity)
-            self._service = None
+            ctx = getattr(self, '_ctx', None) or \
+                  autoclass('org.kivy.android.PythonActivity').mActivity
+            ctx.stopService(self._make_intent(ctx, DATA_DIR))
+            self._started = False
+            print('[Service] PythonService stopped')
         except Exception as e:
             print(f"[Service] stop error: {e}")
 
@@ -1322,10 +1342,10 @@ class TimekeeperApp(App):
             from jnius import autoclass
 
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            PythonService  = autoclass('org.kivy.android.PythonService')
             AlarmManager   = autoclass('android.app.AlarmManager')
             PendingIntent  = autoclass('android.app.PendingIntent')
             Intent         = autoclass('android.content.Intent')
-            ComponentName  = autoclass('android.content.ComponentName')
             JString        = autoclass('java.lang.String')
 
             ctx       = PythonActivity.mActivity
@@ -1338,11 +1358,19 @@ class TimekeeperApp(App):
             with open(alert_path, "w") as f:
                 _json.dump({"is_break": is_break, "finish_at": finish_at}, f)
 
-            # Intent targeting ServiceTimekeeper (declared in buildozer.spec)
-            cn     = ComponentName(JString("com.timekeeper.timekeeper"),
-                                   JString("com.timekeeper.timekeeper.ServiceTimekeeper"))
-            intent = Intent()
-            intent.setComponent(cn)
+            # Intent targeting PythonService (always in APK as part of bootstrap)
+            android_private = ctx.getFilesDir().getAbsolutePath()
+            app_root        = android_private + '/app'
+            intent = Intent(ctx, PythonService)
+            intent.putExtra(JString('androidPrivate'),          JString(android_private))
+            intent.putExtra(JString('androidArgument'),         JString(app_root))
+            intent.putExtra(JString('serviceEntrypoint'),       JString('service/main.py'))
+            intent.putExtra(JString('pythonName'),              JString('python'))
+            intent.putExtra(JString('serviceStartAsForeground'),JString('false'))
+            intent.putExtra(JString('serviceTitle'),            JString('Timekeeper'))
+            intent.putExtra(JString('pythonHome'),              JString(app_root))
+            intent.putExtra(JString('pythonPath'),              JString(app_root + ':' + app_root + '/lib'))
+            intent.putExtra(JString('pythonServiceArgument'),   JString('alarm'))
 
             flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
             pi = PendingIntent.getService(ctx, 99, intent, flags)
