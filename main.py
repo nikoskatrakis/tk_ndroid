@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00017"
+APP_VERSION        = "v0.00018"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5

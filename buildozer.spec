@@ -6,18 +6,18 @@ package.domain = com.timekeeper
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 
-version = 0.00007
+version = 0.00008
 
 requirements = python3,kivy,android
 
-android.services = Timekeeper:service/main.py:foreground:foregroundServiceType=mediaPlayback
+android.services = Timekeeper:service/main.py:foreground
 
 orientation = portrait
 fullscreen = 0
 
 android.accept_sdk_license = True
 
-android.permissions = RECORD_AUDIO, INTERNET, WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE, WAKE_LOCK, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, USE_EXACT_ALARM, SCHEDULE_EXACT_ALARM, REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, RECEIVE_BOOT_COMPLETED
+android.permissions = RECORD_AUDIO, INTERNET, WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE, WAKE_LOCK, FOREGROUND_SERVICE, USE_EXACT_ALARM, SCHEDULE_EXACT_ALARM, REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, RECEIVE_BOOT_COMPLETED
 android.api = 34
 android.minapi = 21
 android.ndk = 28c
