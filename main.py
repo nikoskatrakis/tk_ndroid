@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00020"
+APP_VERSION        = "v0.00021"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -1322,14 +1322,21 @@ class TimekeeperApp(App):
         """Cancel any pending alarm (app handles completion itself when open)."""
         self._cancel_alarm()
         self._svc_manager.stop()
+        # Cancel the Kivy tick clock NOW — before any overdue _tick() fires on
+        # resume and calls _complete() (which would replay the alarm sound).
+        # engine.sync() in _deferred_resume() is the sole path for detecting
+        # expiration after an unlock.
+        if self.engine._clock_ev:
+            self.engine._clock_ev.cancel()
+            self.engine._clock_ev = None
         # Defer sync by 0.5 s — jnius / mActivity are unreliable immediately
         # after the app comes back to the foreground; defer avoids a startup crash.
         Clock.schedule_once(lambda dt: self._deferred_resume(), 0.5)
 
     def _deferred_resume(self, *_):
         # Service already played sound while locked — don't replay it on resume.
-        # Flag is cleared immediately after sync() returns (sync calls _on_complete
-        # synchronously when the timer has expired).
+        # _skip_alert_sound is read synchronously inside engine.sync() → _complete()
+        # → _on_complete(), so clearing it immediately after sync() is safe.
         self._skip_alert_sound = True
         self.engine.sync()
         self._skip_alert_sound = False
