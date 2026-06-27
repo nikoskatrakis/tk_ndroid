@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00021"
+APP_VERSION        = "v0.00023"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -935,16 +935,16 @@ class MenuScreen(Screen):
 
         root.add_widget(make_label("Menu", font_size=dp(22), color=C_TEXT))
         items = [
-            ("➕  New Task",       self._app.go_new_task),
-            ("✏️  Rename Task",     self._app.go_rename_task),
-            ("🔀  Switch Task",     self._app.go_switch_task),
-            ("📋  Edit Entries",    self._app.go_entries),
-            ("📤  Export CSV",      self._app.do_export_csv),
-            ("⚙️  Settings",        self._app.go_settings),
-            ("🎤  Voice Commands",  self._app.go_shortcuts),
-            ("ℹ️  About",           self._app.go_about),
-            ("← Back",             self._app.go_main),
-            ("✖  Quit",            self._app.stop),
+            ("New Task",       self._app.go_new_task),
+            ("Rename Task",    self._app.go_rename_task),
+            ("Switch Task",    self._app.go_switch_task),
+            ("Edit Entries",   self._app.go_entries),
+            ("Export CSV",     self._app.do_export_csv),
+            ("Settings",       self._app.go_settings),
+            ("Voice Commands", self._app.go_shortcuts),
+            ("About",          self._app.go_about),
+            ("Back",           self._app.go_main),
+            ("Quit",           self._app.stop),
         ]
         for label, cb in items:
             root.add_widget(make_button(label, cb, height=dp(52)))
@@ -1334,10 +1334,18 @@ class TimekeeperApp(App):
         Clock.schedule_once(lambda dt: self._deferred_resume(), 0.5)
 
     def _deferred_resume(self, *_):
-        # Service already played sound while locked — don't replay it on resume.
-        # _skip_alert_sound is read synchronously inside engine.sync() → _complete()
-        # → _on_complete(), so clearing it immediately after sync() is safe.
-        self._skip_alert_sound = True
+        # Only suppress sound if the service actually played it (marker file present).
+        # This avoids suppressing sound in cases where the alarm never fired
+        # (e.g. user unlocked before timer expired, or service failed to start).
+        marker_path = os.path.join(DATA_DIR, 'alarm_played.marker')
+        if os.path.exists(marker_path):
+            self._skip_alert_sound = True
+            try:
+                os.remove(marker_path)
+            except Exception:
+                pass
+        else:
+            self._skip_alert_sound = False
         self.engine.sync()
         self._skip_alert_sound = False
         self._refresh_main()

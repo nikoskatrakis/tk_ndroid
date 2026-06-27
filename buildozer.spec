@@ -6,7 +6,7 @@ package.domain = com.timekeeper
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 
-version = 0.00008
+version = 0.00009
 
 requirements = python3,kivy,android
 
@@ -15,6 +15,8 @@ requirements = python3,kivy,android
 
 orientation = portrait
 fullscreen = 0
+
+android.icon.filename = %(source.dir)s/icon.png
 
 android.accept_sdk_license = True
 
