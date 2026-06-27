@@ -31,7 +31,7 @@ from kivy.utils import platform
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-APP_VERSION        = "v0.00023"
+APP_VERSION        = "v0.00024"
 APP_NAME           = "Timekeeper"
 DEFAULT_TASK_MINS  = 25
 DEFAULT_BREAK_MINS = 5
@@ -78,10 +78,19 @@ class Storage:
         with self._connect() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS tasks (
-                    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name    TEXT    NOT NULL UNIQUE,
-                    created TEXT    NOT NULL
+                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name     TEXT    NOT NULL UNIQUE,
+                    created  TEXT    NOT NULL,
+                    archived INTEGER NOT NULL DEFAULT 0
                 );
+                -- migrate: add archived column if it doesn't exist yet
+                -- (safe to run on existing DBs; ignored if column already present)
+            """)
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+            except Exception:
+                pass  # column already exists
+            conn.executescript("""
                 CREATE TABLE IF NOT EXISTS entries (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id       INTEGER NOT NULL,
@@ -113,8 +122,22 @@ class Storage:
     def get_tasks(self):
         with self._connect() as conn:
             return [dict(r) for r in conn.execute(
-                "SELECT * FROM tasks ORDER BY name"
+                "SELECT * FROM tasks WHERE archived=0 ORDER BY name"
             ).fetchall()]
+
+    def get_archived_tasks(self):
+        with self._connect() as conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM tasks WHERE archived=1 ORDER BY name"
+            ).fetchall()]
+
+    def archive_task(self, task_id):
+        with self._connect() as conn:
+            conn.execute("UPDATE tasks SET archived=1 WHERE id=?", (task_id,))
+
+    def unarchive_task(self, task_id):
+        with self._connect() as conn:
+            conn.execute("UPDATE tasks SET archived=0 WHERE id=?", (task_id,))
 
     def add_task(self, name):
         with self._connect() as conn:
@@ -935,16 +958,18 @@ class MenuScreen(Screen):
 
         root.add_widget(make_label("Menu", font_size=dp(22), color=C_TEXT))
         items = [
-            ("New Task",       self._app.go_new_task),
-            ("Rename Task",    self._app.go_rename_task),
-            ("Switch Task",    self._app.go_switch_task),
-            ("Edit Entries",   self._app.go_entries),
-            ("Export CSV",     self._app.do_export_csv),
-            ("Settings",       self._app.go_settings),
-            ("Voice Commands", self._app.go_shortcuts),
-            ("About",          self._app.go_about),
-            ("Back",           self._app.go_main),
-            ("Quit",           self._app.stop),
+            ("New Task",        self._app.go_new_task),
+            ("Rename Task",     self._app.go_rename_task),
+            ("Switch Task",     self._app.go_switch_task),
+            ("Archive Task",    self._app.go_archive_task),
+            ("Archived Tasks",  self._app.go_archived_tasks),
+            ("Edit Entries",    self._app.go_entries),
+            ("Export CSV",      self._app.do_export_csv),
+            ("Settings",        self._app.go_settings),
+            ("Voice Commands",  self._app.go_shortcuts),
+            ("About",           self._app.go_about),
+            ("Back",            self._app.go_main),
+            ("Quit",            self._app.stop),
         ]
         for label, cb in items:
             root.add_widget(make_button(label, cb, height=dp(52)))
@@ -954,8 +979,71 @@ class MenuScreen(Screen):
 class TaskListScreen(Screen):
     def __init__(self, app, mode="switch", **kwargs):
         super().__init__(name=f"tasklist_{mode}", **kwargs)
-        self._app  = app
-        self._mode = mode
+        self._app   = app
+        self._mode  = mode
+        self._tasks = []
+        self._inner = None
+
+    def on_pre_enter(self):
+        self.clear_widgets()
+        self._tasks = self._app.storage.get_tasks()
+
+        root = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(10))
+        with root.canvas.before:
+            Color(*C_BG)
+            rect = Rectangle(pos=root.pos, size=root.size)
+        root.bind(pos=lambda w, v: setattr(rect, "pos", v),
+                  size=lambda w, v: setattr(rect, "size", v))
+
+        titles = {"switch": "Switch Task", "rename": "Rename Task",
+                  "archive": "Archive Task"}
+        root.add_widget(make_label(titles.get(self._mode, "Tasks"),
+                                   font_size=dp(20), color=C_TEXT))
+
+        # Search box
+        search = TextInput(hint_text="Type to search...", multiline=False,
+                           size_hint=(1, None), height=dp(44),
+                           font_size=dp(15), foreground_color=C_TEXT,
+                           background_color=C_SURFACE)
+        search.bind(text=lambda ti, val: self._filter(val))
+        root.add_widget(search)
+
+        scroll = ScrollView(size_hint=(1, 1))
+        self._inner = BoxLayout(orientation="vertical",
+                                size_hint=(1, None), spacing=dp(8), padding=dp(4))
+        self._inner.bind(minimum_height=self._inner.setter("height"))
+        self._filter("")
+        scroll.add_widget(self._inner)
+        root.add_widget(scroll)
+        root.add_widget(make_button("Back", self._app.go_menu, height=dp(48)))
+        self.add_widget(root)
+
+    def _filter(self, text):
+        self._inner.clear_widgets()
+        q = text.strip().lower()
+        matches = [t for t in self._tasks
+                   if q == "" or q in t["name"].lower()]
+        if not matches:
+            self._inner.add_widget(make_label("No matching tasks.", color=C_SUBTEXT))
+            return
+        for t in matches:
+            btn = Button(text=t["name"], size_hint=(1, None), height=dp(50),
+                         font_size=dp(16), background_normal="",
+                         background_color=C_BTN, color=C_TEXT)
+            tc = dict(t)
+            if self._mode == "switch":
+                btn.bind(on_release=lambda b, tc=tc: self._app.select_task(tc))
+            elif self._mode == "rename":
+                btn.bind(on_release=lambda b, tc=tc: self._app.start_rename(tc))
+            else:  # archive
+                btn.bind(on_release=lambda b, tc=tc: self._app.confirm_archive(tc))
+            self._inner.add_widget(btn)
+
+
+class ArchivedTasksScreen(Screen):
+    def __init__(self, app, **kwargs):
+        super().__init__(name="archived_tasks", **kwargs)
+        self._app = app
 
     def on_pre_enter(self):
         self.clear_widgets()
@@ -966,31 +1054,33 @@ class TaskListScreen(Screen):
         root.bind(pos=lambda w, v: setattr(rect, "pos", v),
                   size=lambda w, v: setattr(rect, "size", v))
 
-        title = "Switch Task" if self._mode == "switch" else "Rename Task"
-        root.add_widget(make_label(title, font_size=dp(20), color=C_TEXT))
+        root.add_widget(make_label("Archived Tasks", font_size=dp(20), color=C_TEXT))
 
         scroll = ScrollView(size_hint=(1, 1))
         inner  = BoxLayout(orientation="vertical",
                            size_hint=(1, None), spacing=dp(8), padding=dp(4))
         inner.bind(minimum_height=inner.setter("height"))
 
-        tasks = self._app.storage.get_tasks()
+        tasks = self._app.storage.get_archived_tasks()
         if not tasks:
-            inner.add_widget(make_label("No tasks yet.", color=C_SUBTEXT))
+            inner.add_widget(make_label("No archived tasks.", color=C_SUBTEXT))
         for t in tasks:
-            btn = Button(text=t["name"], size_hint=(1, None), height=dp(50),
+            row = BoxLayout(size_hint=(1, None), height=dp(50), spacing=dp(8))
+            lbl = Button(text=t["name"], size_hint=(1, 1),
                          font_size=dp(16), background_normal="",
                          background_color=C_BTN, color=C_TEXT)
+            restore_btn = Button(text="Restore", size_hint=(None, 1), width=dp(90),
+                                 font_size=dp(14), background_normal="",
+                                 background_color=C_BTN_ACT, color=C_TEXT)
             tc = dict(t)
-            if self._mode == "switch":
-                btn.bind(on_release=lambda b, tc=tc: self._app.select_task(tc))
-            else:
-                btn.bind(on_release=lambda b, tc=tc: self._app.start_rename(tc))
-            inner.add_widget(btn)
+            restore_btn.bind(on_release=lambda b, tc=tc: self._app.restore_task(tc))
+            row.add_widget(lbl)
+            row.add_widget(restore_btn)
+            inner.add_widget(row)
 
         scroll.add_widget(inner)
         root.add_widget(scroll)
-        root.add_widget(make_button("← Back", self._app.go_menu, height=dp(48)))
+        root.add_widget(make_button("Back", self._app.go_menu, height=dp(48)))
         self.add_widget(root)
 
 
@@ -1273,13 +1363,16 @@ class TimekeeperApp(App):
         self._shortcuts_screen = ShortcutsScreen(app=self)
         self._switch_screen    = TaskListScreen(app=self, mode="switch")
         self._rename_screen    = TaskListScreen(app=self, mode="rename")
+        self._archive_screen   = TaskListScreen(app=self, mode="archive")
+        self._archived_screen  = ArchivedTasksScreen(app=self)
 
         for s in [
             self._main_screen, self._menu_screen,
             self._entries_screen, self._edit_screen,
             self._settings_screen, self._about_screen,
             self._shortcuts_screen, self._switch_screen,
-            self._rename_screen,
+            self._rename_screen, self._archive_screen,
+            self._archived_screen,
         ]:
             self.sm.add_widget(s)
 
@@ -1495,8 +1588,10 @@ class TimekeeperApp(App):
     def go_settings(self):   self.sm.current = "settings"
     def go_about(self):      self.sm.current = "about"
     def go_shortcuts(self):  self.sm.current = "shortcuts"
-    def go_switch_task(self): self.sm.current = "tasklist_switch"
-    def go_rename_task(self): self.sm.current = "tasklist_rename"
+    def go_switch_task(self):   self.sm.current = "tasklist_switch"
+    def go_rename_task(self):   self.sm.current = "tasklist_rename"
+    def go_archive_task(self):  self.sm.current = "tasklist_archive"
+    def go_archived_tasks(self): self.sm.current = "archived_tasks"
 
     def go_new_task(self):
         show_input_popup("New Task", "Task name", self._create_task)
@@ -1528,6 +1623,32 @@ class TimekeeperApp(App):
         self.storage.set_setting("last_task_id", str(task["id"]))
         self._refresh_main()
         self.go_main()
+
+    def confirm_archive(self, task):
+        # Block archiving the task whose timer is currently running
+        if (self._current_task and self._current_task["id"] == task["id"]
+                and self.engine.state in (TimerState.RUNNING, TimerState.BREAK,
+                                          TimerState.PAUSED, TimerState.BREAK_PAUSED)):
+            show_popup("Cannot Archive",
+                       "Stop the timer before archiving the active task.")
+            return
+
+        def _do():
+            self.storage.archive_task(task["id"])
+            if self._current_task and self._current_task["id"] == task["id"]:
+                self._current_task = None
+                self.engine.set_task(None, "")
+                self._refresh_main()
+            show_popup("Archived", f"'{task['name']}' archived.\nEntries kept in history.",
+                       on_dismiss=self.go_menu)
+        show_popup(f"Archive '{task['name']}'?",
+                   "The task will be hidden but all its time entries are kept.",
+                   on_dismiss=_do)
+
+    def restore_task(self, task):
+        self.storage.unarchive_task(task["id"])
+        show_popup("Restored", f"'{task['name']}' is active again.",
+                   on_dismiss=self.go_archived_tasks)
 
     def start_rename(self, task):
         show_input_popup(

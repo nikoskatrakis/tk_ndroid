@@ -6,7 +6,7 @@ package.domain = com.timekeeper
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 
-version = 0.00009
+version = 0.00010
 
 requirements = python3,kivy,android
 
@@ -17,6 +17,7 @@ orientation = portrait
 fullscreen = 0
 
 icon.filename = %(source.dir)s/icon.png
+presplash.filename = %(source.dir)s/presplash.png
 
 android.accept_sdk_license = True
 
